@@ -1,0 +1,114 @@
+[package]
+name = "lan-meeting"
+version = "0.1.0"
+description = "LAN Meeting - High-performance screen sharing tool"
+authors = ["LAN Meeting Team"]
+license = "MIT"
+repository = ""
+edition = "2024"
+rust-version = "1.85"
+
+[lib]
+name = "lan_meeting_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+log = "0.4"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Networking
+quinn = "0.11"              # QUIC protocol
+rustls = "0.23"             # TLS
+rcgen = "0.13"              # Certificate generation
+mdns-sd = "0.17"            # mDNS service discovery
+
+# Input simulation
+enigo = "0.6"               # Cross-platform input simulation
+
+# GPU rendering
+wgpu = "28"                 # Cross-platform GPU API
+winit = "0.30"              # Window management
+
+# Image processing
+image = "0.25"
+
+# Video encoding
+openh264 = "0.6"           # Cisco OpenH264 software encoder
+lz4_flex = "0.11"          # Fast compression for raw frames
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+bytes = "1"
+uuid = { version = "1", features = ["v4"] }
+once_cell = "1"
+hostname = "0.4"
+pollster = "0.4"            # Sync executor for async code
+
+# File transfer
+sha2 = "0.10"               # SHA-256 checksum
+mime_guess = "2"            # MIME type detection
+dirs = "5"                  # Standard directories
+
+[dev-dependencies]
+tempfile = "3"              # Temp files for tests
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-media = "0.3"
+objc2-core-video = "0.3"
+objc2-screen-capture-kit = "0.3"
+block2 = "0.6"
+dispatch2 = "0.2"
+core-foundation = "0.10"
+core-graphics = "0.25"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pipewire = { version = "0.8", optional = true }
+wayland-client = { version = "0.31", optional = true }
+x11rb = { version = "0.13", optional = true }
+
+[features]
+default = []
+pipewire = ["dep:pipewire"]
+wayland = ["dep:wayland-client"]
+x11 = ["dep:x11rb"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

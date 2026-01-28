@@ -1,0 +1,34 @@
+{
+  "name": "lan-meeting",
+  "version": "0.1.0",
+  "description": "LAN Meeting - High-performance screen sharing tool",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@iconify-json/lucide": "^1.2.87",
+    "@tauri-apps/api": "^2.9.1",
+    "@tauri-apps/cli": "^2.9.6",
+    "@types/bun": "latest",
+    "@unocss/preset-icons": "^66.6.0",
+    "@unocss/preset-uno": "^66.6.0",
+    "typescript": "^5.9.3",
+    "unocss": "^66.6.0",
+    "vite": "^7.3.1",
+    "vite-plugin-solid": "^2.11.10"
+  },
+  "dependencies": {
+    "@kobalte/core": "^0.13.11",
+    "@solidjs/router": "^0.15.4",
+    "@tauri-apps/plugin-dialog": "^2",
+    "solid-js": "^1.9.11"
+  }
+}

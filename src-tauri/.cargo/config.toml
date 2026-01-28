@@ -1,0 +1,12 @@
+# Cargo configuration
+# Note: Use CARGO_TARGET_DIR env var for platform-specific builds
+
+[build]
+# Uncomment for release builds optimization
+# rustflags = ["-C", "target-cpu=native"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks"]
