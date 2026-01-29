@@ -253,8 +253,9 @@ pub fn update_device_status(id: &str, status: DeviceStatus) {
 }
 
 /// Manually add a device by IP address
-/// This will attempt to connect to verify the device is reachable
+/// This will attempt to connect and exchange handshake to verify the device
 pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice, NetworkError> {
+    use super::protocol;
     use std::net::SocketAddr;
     use std::time::Duration;
 
@@ -264,42 +265,88 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
 
     // Try to connect with a timeout to verify the device is reachable
     let endpoint = crate::get_quic_endpoint()
-        .ok_or_else(|| NetworkError::ConnectionFailed("QUIC endpoint not initialized".to_string()))?;
+        .ok_or_else(|| NetworkError::ConnectionFailed("请先开启服务".to_string()))?;
 
     // Attempt connection with timeout
     let connect_future = endpoint.connect(addr);
     let timeout_duration = Duration::from_secs(5);
 
-    match tokio::time::timeout(timeout_duration, connect_future).await {
-        Ok(Ok(_conn)) => {
-            // Connection successful, add device as online
-            let device = DiscoveredDevice {
-                id: format!("manual-{}", ip.replace('.', "-")),
-                name: format!("Device at {}", ip),
-                ip,
-                port,
-                status: DeviceStatus::Online,
-                last_seen: now_ms(),
-            };
-
-            add_device(device.clone());
-            log::info!("Manual device added and verified: {}", device.ip);
-            Ok(device)
-        }
+    let conn = match tokio::time::timeout(timeout_duration, connect_future).await {
+        Ok(Ok(conn)) => conn,
         Ok(Err(e)) => {
             log::warn!("Failed to connect to manual device {}: {}", ip, e);
-            Err(NetworkError::ConnectionFailed(format!(
-                "Connection failed: {}",
-                e
-            )))
+            return Err(NetworkError::ConnectionFailed(format!(
+                "连接失败: 对方可能未开启服务"
+            )));
         }
         Err(_) => {
             log::warn!("Connection timeout to manual device {}", ip);
-            Err(NetworkError::ConnectionFailed(
-                "Connection timeout - device may not be running LAN Meeting".to_string(),
-            ))
+            return Err(NetworkError::ConnectionFailed(
+                "连接超时: 对方可能未开启服务".to_string(),
+            ));
         }
-    }
+    };
+
+    // Send handshake to get device info
+    let our_id = get_our_device_id();
+    let our_name = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let handshake = protocol::create_handshake(&our_id, &our_name);
+    let encoded = protocol::encode(&handshake)?;
+
+    let mut stream = conn.open_bi_stream().await?;
+    stream.send_framed(&encoded).await?;
+
+    // Wait for handshake ack with timeout
+    let recv_future = stream.recv_framed();
+    let response = match tokio::time::timeout(Duration::from_secs(5), recv_future).await {
+        Ok(Ok(data)) => data,
+        Ok(Err(e)) => {
+            return Err(NetworkError::ConnectionFailed(format!(
+                "握手失败: {}", e
+            )));
+        }
+        Err(_) => {
+            return Err(NetworkError::ConnectionFailed(
+                "握手超时".to_string(),
+            ));
+        }
+    };
+
+    // Parse handshake ack to get device info
+    let ack = protocol::decode(&response)?;
+    let (device_id, device_name) = match ack {
+        protocol::Message::HandshakeAck { device_id, name, accepted, reason, .. } => {
+            if !accepted {
+                return Err(NetworkError::ConnectionFailed(format!(
+                    "对方拒绝连接: {}",
+                    reason.unwrap_or_else(|| "未知原因".to_string())
+                )));
+            }
+            (device_id, name)
+        }
+        _ => {
+            return Err(NetworkError::ConnectionFailed(
+                "无效的握手响应".to_string(),
+            ));
+        }
+    };
+
+    // Connection and handshake successful, add device
+    let device = DiscoveredDevice {
+        id: device_id,
+        name: device_name,
+        ip,
+        port,
+        status: DeviceStatus::Online,
+        last_seen: now_ms(),
+    };
+
+    add_device(device.clone());
+    log::info!("Manual device added and verified: {} ({})", device.name, device.ip);
+    Ok(device)
 }
 
 /// Shutdown mDNS service
