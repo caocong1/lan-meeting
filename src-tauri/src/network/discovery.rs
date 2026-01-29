@@ -22,6 +22,8 @@ pub struct DiscoveredDevice {
     pub port: u16,
     pub status: DeviceStatus,
     pub last_seen: u64,
+    #[serde(default)]
+    pub is_sharing: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -210,6 +212,7 @@ fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
         port,
         status: DeviceStatus::Online,
         last_seen: now_ms(),
+        is_sharing: false,
     })
 }
 
@@ -250,6 +253,28 @@ pub fn update_device_status(id: &str, status: DeviceStatus) {
         device.status = status;
         device.last_seen = now_ms();
     }
+}
+
+/// Update device sharing status
+pub fn update_device_sharing(id: &str, is_sharing: bool) {
+    let mut devices = DEVICES.write();
+    if let Some(device) = devices.get_mut(id) {
+        device.is_sharing = is_sharing;
+        device.last_seen = now_ms();
+    }
+}
+
+/// Update device sharing status by IP
+pub fn update_device_sharing_by_ip(ip: &str, is_sharing: bool) -> Option<String> {
+    let mut devices = DEVICES.write();
+    for device in devices.values_mut() {
+        if device.ip == ip {
+            device.is_sharing = is_sharing;
+            device.last_seen = now_ms();
+            return Some(device.id.clone());
+        }
+    }
+    None
 }
 
 /// Manually add a device by IP address
@@ -342,6 +367,7 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
         port,
         status: DeviceStatus::Online,
         last_seen: now_ms(),
+        is_sharing: false,
     };
 
     add_device(device.clone());

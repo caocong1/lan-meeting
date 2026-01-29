@@ -170,6 +170,7 @@ async fn handle_message(
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
+                is_sharing: false,
             };
             network::discovery::add_device(remote_device.clone());
             log::info!("Added {} ({}) to device list", name, remote_addr.ip());
@@ -260,9 +261,36 @@ async fn handle_message(
             }
         }
 
-        // Screen sharing messages will be handled in Phase 3
-        Message::ScreenOffer { .. }
-        | Message::ScreenRequest { .. }
+        // Screen sharing messages
+        Message::ScreenOffer { displays } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            let is_sharing = !displays.is_empty();
+
+            log::info!(
+                "Received screen offer from {}: {} displays (sharing: {})",
+                remote_ip,
+                displays.len(),
+                is_sharing
+            );
+
+            // Update device sharing status
+            if let Some(device_id) = network::discovery::update_device_sharing_by_ip(&remote_ip, is_sharing) {
+                // Emit event to frontend
+                if let Some(handle) = APP_HANDLE.get() {
+                    #[derive(serde::Serialize, Clone)]
+                    struct SharingStatusEvent {
+                        device_id: String,
+                        is_sharing: bool,
+                    }
+                    let _ = handle.emit("sharing-status-changed", SharingStatusEvent {
+                        device_id,
+                        is_sharing,
+                    });
+                }
+            }
+        }
+
+        Message::ScreenRequest { .. }
         | Message::ScreenStart { .. }
         | Message::ScreenFrame { .. }
         | Message::ScreenStop => {
