@@ -196,14 +196,15 @@ async fn handle_message(
                 id: device_id.clone(),
                 name: name.clone(),
                 ip: remote_addr.ip().to_string(),
-                port: remote_addr.port(),
-                status: network::discovery::DeviceStatus::Busy, // Connected = Busy
+                port: network::quic::DEFAULT_PORT, // Use default port, not ephemeral source port
+                status: network::discovery::DeviceStatus::Online,
                 last_seen: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0),
             };
             network::discovery::add_device(remote_device.clone());
+            log::info!("Added {} ({}) to device list", name, remote_addr.ip());
 
             // Emit event to frontend to notify about the new connection
             if let Some(handle) = APP_HANDLE.get() {
