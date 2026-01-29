@@ -259,16 +259,31 @@ pub fn get_self_info() -> Result<SelfInfo, String> {
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_else(|_| "Unknown".to_string());
 
+    // Get local IP address
+    let ip = get_local_ip().unwrap_or_else(|| "127.0.0.1".to_string());
+
     Ok(SelfInfo {
         id: discovery::get_our_device_id().to_string(),
         name: hostname,
+        ip,
     })
+}
+
+/// Get local IP address
+fn get_local_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    // Connect to a public IP to determine local IP (doesn't actually send data)
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    let addr = socket.local_addr().ok()?;
+    Some(addr.ip().to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SelfInfo {
     pub id: String,
     pub name: String,
+    pub ip: String,
 }
 
 // ===== Chat commands =====
@@ -480,4 +495,163 @@ pub fn get_download_directory() -> String {
         .download_dir()
         .to_string_lossy()
         .to_string()
+}
+
+// ===== Service commands =====
+
+/// Service state
+static SERVICE_RUNNING: once_cell::sync::Lazy<parking_lot::RwLock<bool>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(false));
+
+/// Start the network service (mDNS discovery + QUIC server)
+#[tauri::command]
+pub async fn start_service() -> Result<(), String> {
+    log::info!("Starting network service");
+
+    // Service is already started in lib.rs setup, just mark as running
+    *SERVICE_RUNNING.write() = true;
+
+    Ok(())
+}
+
+/// Stop the network service
+#[tauri::command]
+pub async fn stop_service() -> Result<(), String> {
+    log::info!("Stopping network service");
+
+    // Disconnect all peers
+    disconnect(None).await?;
+
+    // Clear device list
+    discovery::clear_devices();
+
+    *SERVICE_RUNNING.write() = false;
+
+    Ok(())
+}
+
+/// Check if service is running
+#[tauri::command]
+pub fn is_service_running() -> bool {
+    *SERVICE_RUNNING.read()
+}
+
+// ===== Settings commands =====
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub device_name: String,
+    pub quality: String,
+    pub fps: u32,
+}
+
+/// Global settings
+static SETTINGS: once_cell::sync::Lazy<parking_lot::RwLock<AppSettings>> =
+    once_cell::sync::Lazy::new(|| {
+        let hostname = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        parking_lot::RwLock::new(AppSettings {
+            device_name: hostname,
+            quality: "auto".to_string(),
+            fps: 30,
+        })
+    });
+
+/// Get current settings
+#[tauri::command]
+pub fn get_settings() -> AppSettings {
+    SETTINGS.read().clone()
+}
+
+/// Save settings
+#[tauri::command]
+pub fn save_settings(settings: AppSettings) -> Result<(), String> {
+    log::info!("Saving settings: {:?}", settings);
+    *SETTINGS.write() = settings;
+    Ok(())
+}
+
+// ===== Sharing status commands =====
+
+/// Sharing state
+static IS_SHARING: once_cell::sync::Lazy<parking_lot::RwLock<bool>> =
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(false));
+
+/// Broadcast sharing status to all connected peers
+#[tauri::command]
+pub async fn broadcast_sharing_status(is_sharing: bool) -> Result<(), String> {
+    use crate::network::protocol;
+
+    log::info!("Broadcasting sharing status: {}", is_sharing);
+
+    *IS_SHARING.write() = is_sharing;
+
+    // Create sharing status message
+    let msg = protocol::Message::ScreenOffer {
+        displays: if is_sharing {
+            // Get current displays
+            match get_displays().await {
+                Ok(displays) => displays
+                    .into_iter()
+                    .map(|d| protocol::DisplayInfo {
+                        id: d.id,
+                        name: d.name,
+                        width: d.width,
+                        height: d.height,
+                        primary: d.primary,
+                    })
+                    .collect(),
+                Err(_) => vec![],
+            }
+        } else {
+            vec![]
+        },
+    };
+
+    if let Ok(encoded) = protocol::encode(&msg) {
+        let results = quic::broadcast_message(&encoded).await;
+        let success_count = results.iter().filter(|r| r.is_ok()).count();
+        log::info!("Sharing status broadcast to {} peers", success_count);
+    }
+
+    Ok(())
+}
+
+/// Open viewer window to watch a peer's screen
+#[tauri::command]
+pub async fn open_viewer_window(
+    _peer_id: String,
+    peer_name: String,
+    peer_ip: String,
+) -> Result<(), String> {
+    log::info!("Opening viewer window for {} ({})", peer_name, peer_ip);
+
+    // TODO: Create a new window to view the peer's screen
+    // For now, just log and return
+    log::warn!("Viewer window not yet implemented");
+
+    Ok(())
+}
+
+/// Request control of a peer's screen
+#[tauri::command]
+pub async fn request_control(peer_id: String) -> Result<(), String> {
+    use crate::network::protocol;
+
+    log::info!("Requesting control of {}", peer_id);
+
+    let self_info = get_self_info()?;
+    let msg = protocol::Message::ControlRequest {
+        from_user: self_info.name,
+    };
+
+    if let Ok(encoded) = protocol::encode(&msg) {
+        quic::send_to_peer(&peer_id, &encoded)
+            .await
+            .map_err(|e| format!("Failed to send control request: {}", e))?;
+    }
+
+    Ok(())
 }

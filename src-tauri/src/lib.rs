@@ -108,6 +108,17 @@ pub fn run() {
             commands::get_active_file_transfers,
             commands::get_file_transfer,
             commands::get_download_directory,
+            // Service commands
+            commands::start_service,
+            commands::stop_service,
+            commands::is_service_running,
+            // Settings commands
+            commands::get_settings,
+            commands::save_settings,
+            // Sharing commands
+            commands::broadcast_sharing_status,
+            commands::open_viewer_window,
+            commands::request_control,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

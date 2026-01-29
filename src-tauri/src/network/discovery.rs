@@ -237,6 +237,12 @@ pub fn remove_device(id: &str) {
     devices.remove(id);
 }
 
+/// Clear all devices
+pub fn clear_devices() {
+    let mut devices = DEVICES.write();
+    devices.clear();
+}
+
 /// Update device status
 pub fn update_device_status(id: &str, status: DeviceStatus) {
     let mut devices = DEVICES.write();
