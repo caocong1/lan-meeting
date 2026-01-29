@@ -1,7 +1,13 @@
 // Video decoder module
 // Hardware decoding with software fallback
+//
+// Decoder priority:
+// 1. Vulkan Video (cross-platform hardware acceleration via vk-video)
+// 2. Platform-specific hardware (VideoToolbox/DXVA/VAAPI)
+// 3. OpenH264 software decoder
 
 pub mod software;
+pub mod vulkan;
 
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
@@ -51,6 +57,25 @@ impl Default for DecoderConfig {
     }
 }
 
+/// Decoded frame data - either CPU memory or GPU texture
+#[derive(Debug)]
+pub enum DecodedFrameData {
+    /// Frame data in CPU memory (BGRA or YUV420)
+    Cpu {
+        data: Vec<u8>,
+        /// For YUV420: strides for Y, U, V planes
+        strides: Option<[usize; 3]>,
+    },
+    /// Frame decoded directly to GPU texture (zero-copy path)
+    /// Note: Requires vk-video to update to wgpu 28 for full support
+    /// For now, this variant is reserved for future use
+    #[allow(dead_code)]
+    Gpu {
+        /// Placeholder for future wgpu::Texture integration
+        texture_id: u64,
+    },
+}
+
 /// Decoded frame ready for rendering
 #[derive(Debug)]
 pub struct DecodedFrame {
@@ -58,26 +83,22 @@ pub struct DecodedFrame {
     pub height: u32,
     pub timestamp: u64,
     pub format: OutputFormat,
-    /// BGRA or YUV420 data depending on format
-    pub data: Vec<u8>,
-    /// For YUV420: strides for Y, U, V planes
-    pub strides: Option<[usize; 3]>,
+    pub data: DecodedFrameData,
 }
 
 impl DecodedFrame {
-    /// Create a BGRA frame
+    /// Create a BGRA frame in CPU memory
     pub fn bgra(width: u32, height: u32, timestamp: u64, data: Vec<u8>) -> Self {
         Self {
             width,
             height,
             timestamp,
             format: OutputFormat::BGRA,
-            data,
-            strides: None,
+            data: DecodedFrameData::Cpu { data, strides: None },
         }
     }
 
-    /// Create a YUV420 frame
+    /// Create a YUV420 frame in CPU memory
     pub fn yuv420(
         width: u32,
         height: u32,
@@ -90,8 +111,31 @@ impl DecodedFrame {
             height,
             timestamp,
             format: OutputFormat::YUV420,
-            data,
-            strides: Some(strides),
+            data: DecodedFrameData::Cpu {
+                data,
+                strides: Some(strides),
+            },
+        }
+    }
+
+    /// Check if frame is in CPU memory
+    pub fn is_cpu(&self) -> bool {
+        matches!(self.data, DecodedFrameData::Cpu { .. })
+    }
+
+    /// Get CPU data if available
+    pub fn cpu_data(&self) -> Option<&[u8]> {
+        match &self.data {
+            DecodedFrameData::Cpu { data, .. } => Some(data),
+            DecodedFrameData::Gpu { .. } => None,
+        }
+    }
+
+    /// Get YUV strides if available
+    pub fn strides(&self) -> Option<[usize; 3]> {
+        match &self.data {
+            DecodedFrameData::Cpu { strides, .. } => *strides,
+            DecodedFrameData::Gpu { .. } => None,
         }
     }
 }
@@ -113,8 +157,16 @@ pub trait VideoDecoder: Send + Sync {
 
 /// Create the best available decoder for this platform
 pub fn create_decoder() -> Result<Box<dyn VideoDecoder>, DecoderError> {
-    // Try hardware decoders first, fall back to software
+    // Try Vulkan Video hardware decoder first (cross-platform)
+    match vulkan::VulkanDecoder::new() {
+        Ok(dec) => {
+            log::info!("Using Vulkan Video hardware decoder");
+            return Ok(Box::new(dec));
+        }
+        Err(e) => log::warn!("Vulkan Video decoder not available: {}", e),
+    }
 
+    // Try platform-specific hardware decoders
     #[cfg(target_os = "macos")]
     {
         match videotoolbox::VideoToolboxDecoder::new() {

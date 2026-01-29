@@ -19,32 +19,25 @@
 
 ## 多人会议架构
 
-### 会议模型
+### 会议模型 (实际实现)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        会议室 (Meeting Room)                  │
 │                                                              │
-│  ┌──────────────┐                                           │
-│  │   主持人      │ ◄─── 创建会议、管理成员、主控制权          │
-│  │  (Host)      │                                           │
-│  └──────┬───────┘                                           │
-│         │                                                    │
-│         │ 屏幕流广播 (1-to-N)                                │
-│         ▼                                                    │
-│  ┌──────────────────────────────────────┐                   │
-│  │           参会者 (Participants)        │                   │
-│  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  │                   │
-│  │  │ P1  │  │ P2  │  │ P3  │  │ P4  │  │ ◄── 最多4人观看   │
-│  │  └─────┘  └─────┘  └─────┘  └─────┘  │                   │
-│  └──────────────────────────────────────┘                   │
+│  ┌──────────────────────────────────────────────────────┐   │
+│  │                  对等成员 (Peers)                      │   │
+│  │  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐  ┌─────┐        │   │
+│  │  │  A  │  │  B  │  │  C  │  │  D  │  │  E  │        │   │
+│  │  └─────┘  └─────┘  └─────┘  └─────┘  └─────┘        │   │
+│  └──────────────────────────────────────────────────────┘   │
 │                                                              │
-│  功能：                                                      │
-│  - 任意成员可申请成为演示者                                    │
-│  - 演示者共享屏幕，其他人观看                                  │
-│  - 主持人可授权远程控制                                        │
-│  - 全员可发送聊天消息                                          │
-│  - 全员可传输文件                                              │
+│  特点：                                                      │
+│  - 无主持人，所有成员对等                                      │
+│  - 任意成员可随时开始/停止共享屏幕                              │
+│  - 其他成员看到"正在共享"状态后可点击观看                        │
+│  - 观看者可请求远程控制（待实现）                               │
+│  - 全员可发送聊天消息、传输文件                                 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -54,34 +47,36 @@
     全网状 P2P (Mesh Topology)
 
          ┌─────┐
-         │  A  │
+         │  A  │ ◄─── 正在共享屏幕
          └──┬──┘
            /│\
-          / │ \
+          / │ \   屏幕流 (1-to-N)
          /  │  \
     ┌───┐   │   ┌───┐
-    │ B │───┼───│ C │
+    │ B │───┼───│ C │  ◄─── 观看者
     └───┘   │   └───┘
          \  │  /
           \ │ /
            \│/
          ┌─────┐
-         │  D  │
+         │  D  │  ◄─── 未观看
          └─────┘
 
-每个节点与其他所有节点直连
-- 控制消息: 全网状广播
-- 屏幕流: 演示者 → 所有观看者 (1-to-N)
+- mDNS 发现 + 手动 IP 添加
+- QUIC P2P 直连（自签名证书）
+- 屏幕流: 共享者 → 所有观看者 (1-to-N 广播)
+- 控制消息: 点对点发送
 ```
 
-### 角色定义
+### 角色说明 (简化模型)
 
-| 角色 | 权限 |
+| 状态 | 说明 |
 |------|------|
-| **主持人 (Host)** | 创建会议、踢出成员、授权控制权、结束会议 |
-| **演示者 (Presenter)** | 共享屏幕、允许/拒绝控制请求 |
-| **参会者 (Participant)** | 观看屏幕、请求控制、聊天、传文件 |
-| **控制者 (Controller)** | 被授权后可远程控制演示者屏幕 |
+| **共享者** | 正在共享屏幕的成员，可同时有多个共享者 |
+| **观看者** | 正在观看某个共享者屏幕的成员 |
+| **空闲成员** | 在线但未共享/观看的成员 |
+
+注：原计划的主持人/演示者/控制者角色未实现，当前为简单的对等模型
 
 ---
 
@@ -110,7 +105,7 @@
 
 ---
 
-## 极致性能架构
+## 极致性能架构 (实际实现)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -119,57 +114,81 @@
 │  Frontend (WebView) │              Backend (Rust)                   │
 │  ─────────────────  │  ───────────────────────────────────────────  │
 │  SolidJS + Bun      │                                               │
-│  ├── 控制面板 UI     │  ┌─────────────────────────────────────────┐  │
-│  ├── 状态监控        │  │  capture/ (平台原生)                     │  │
-│  └── 设置界面        │  │  ├── macos.rs   → ScreenCaptureKit      │  │
-│                     │  │  ├── windows.rs → DXGI Desktop Dup      │  │
-│  ┌───────────────┐  │  │  └── linux.rs   → PipeWire/DMA-BUF      │  │
-│  │ wgpu 渲染窗口  │←────│  └─────────────────────────────────────────┘  │
-│  │ (独立/GPU直渲) │  │                                               │
-│  └───────────────┘  │  ┌─────────────────────────────────────────┐  │
-│                     │  │  encoder/ (硬件优先)                     │  │
-│                     │  │  ├── videotoolbox.rs → macOS H264/HEVC  │  │
-│                     │  │  ├── nvenc.rs        → NVIDIA GPU       │  │
-│                     │  │  ├── amf.rs          → AMD GPU          │  │
-│                     │  │  ├── qsv.rs          → Intel QSV        │  │
-│                     │  │  ├── vaapi.rs        → Linux 通用       │  │
-│                     │  │  └── software.rs     → x264 回退        │  │
+│  ├── 会议室 UI       │  ┌─────────────────────────────────────────┐  │
+│  ├── 成员列表        │  │  capture/ (平台原生) ✅                   │  │
+│  ├── 共享开关        │  │  ├── macos.rs   → CGDisplayCreateImage  │  │
+│  └── 设置界面        │  │  ├── windows.rs → DXGI Desktop Dup      │  │
+│                     │  │  └── linux.rs   → X11 XGetImage          │  │
 │                     │  └─────────────────────────────────────────┘  │
 │                     │                                               │
+│ ┌─────────────────┐ │  ┌─────────────────────────────────────────┐  │
+│ │ wgpu 原生窗口    │ │  │  encoder/ (FFmpeg 硬件加速) ✅            │  │
+│ │ (独立进程渲染)   │◄┼──│  ├── ffmpeg/   → NVENC/VT/VAAPI/QSV    │  │
+│ │                 │ │  │  └── software.rs → OpenH264 (回退)      │  │
+│ │ ViewerSession   │ │  └─────────────────────────────────────────┘  │
+│ │ ├─ Vulkan解码   │ │                                               │
+│ │ └─ GPU渲染      │ │                                               │
+│ └─────────────────┘ │                                               │
 │                     │  ┌─────────────────────────────────────────┐  │
-│                     │  │  network/                                │  │
+│                     │  │  network/ ✅                             │  │
 │                     │  │  ├── quic.rs      → QUIC (quinn)        │  │
-│                     │  │  ├── session.rs  → 会议室管理            │  │
-│                     │  │  ├── priority.rs  → 帧优先级调度         │  │
+│                     │  │  ├── protocol.rs → 消息协议              │  │
 │                     │  │  └── discovery.rs → mDNS                │  │
 │                     │  └─────────────────────────────────────────┘  │
 │                     │                                               │
 │                     │  ┌─────────────────────────────────────────┐  │
-│                     │  │  decoder/ (硬件优先)                     │  │
-│                     │  │  └── 对应各平台硬件解码                   │  │
+│                     │  │  streaming/ ✅                           │  │
+│                     │  │  ├── StreamingManager → 发送端           │  │
+│                     │  │  └── ViewerSession   → 接收端+渲染       │  │
 │                     │  └─────────────────────────────────────────┘  │
 │                     │                                               │
 │                     │  ┌─────────────────────────────────────────┐  │
-│                     │  │  renderer/                               │  │
-│                     │  │  └── wgpu.rs → GPU 直接渲染              │  │
+│                     │  │  decoder/ (Vulkan Video 硬件) ✅         │  │
+│                     │  │  ├── vulkan/  → vk-video (Win/Linux)   │  │
+│                     │  │  └── software.rs → OpenH264 (回退)      │  │
+│                     │  └─────────────────────────────────────────┘  │
+│                     │                                               │
+│                     │  ┌─────────────────────────────────────────┐  │
+│                     │  │  renderer/ ✅                            │  │
+│                     │  │  ├── wgpu_renderer.rs → GPU 渲染        │  │
+│                     │  │  └── window.rs → 独立原生窗口            │  │
 │                     │  └─────────────────────────────────────────┘  │
 └─────────────────────┴───────────────────────────────────────────────┘
+
+✅ = 已实现    ⏳ = 存根/待实现
 ```
 
 ---
 
-## 延迟优化链路
+## 延迟优化链路 (当前实现)
 
 ```
-捕获        编码         传输        解码         渲染
-─────────────────────────────────────────────────────────
-平台原生  →  硬件编码  →  QUIC/UDP  →  硬件解码  →  wgpu GPU
-  ↓           ↓           ↓            ↓            ↓
- ~3ms       ~3ms        ~1ms         ~3ms         ~2ms
-─────────────────────────────────────────────────────────
-                    总延迟: ~12-15ms (理想)
-                           ~20-30ms (实际)
+捕获           编码               传输          解码              渲染
+─────────────────────────────────────────────────────────────────────────
+平台原生     →  FFmpeg (HW)    →  QUIC      →  Vulkan Video   →  wgpu GPU
+(CGImage/      (VideoToolbox/    (quinn)      (vk-video)        (原生窗口)
+ DXGI/X11)      NVENC/VAAPI)
+  ↓               ↓               ↓              ↓                ↓
+~5-10ms        ~2-5ms          ~1-5ms        ~2-5ms           ~2-5ms
+─────────────────────────────────────────────────────────────────────────
+                        总延迟: ~12-30ms (硬件加速)
+                               ~25-50ms (软件回退)
 ```
+
+**硬件加速优化**:
+- FFmpeg 硬件编码: VideoToolbox/NVENC/VAAPI/QSV
+- Vulkan Video 硬件解码 (Windows/Linux, vk-video)
+- macOS 暂时使用 OpenH264 软件解码 (Vulkan 不支持)
+
+**软件回退链**:
+- 编码: FFmpeg HW → libx264 → OpenH264
+- 解码: Vulkan Video → OpenH264
+
+**已优化**:
+- Rust 原生渲染，无 WebView IPC 开销
+- 直接 GPU 纹理上传
+- 帧率控制避免积压
+- 自动硬件检测和回退
 
 ---
 
@@ -191,32 +210,44 @@
 | Windows | DXGI Desktop Duplication | `windows` crate | GPU 直接访问 |
 | Linux | PipeWire + DMA-BUF | `pipewire-rs` | Wayland 原生 |
 
-### 视频编码 (硬件优先)
+### 视频编码 (FFmpeg 硬件加速)
 
-| 平台 | 硬件编码器 | Rust 绑定 | 回退方案 |
-|------|-----------|-----------|----------|
-| macOS | VideoToolbox | `videotoolbox-rs` | - |
-| Windows/Linux (NVIDIA) | NVENC | `nvenc-rs` | x264 |
-| Windows/Linux (AMD) | AMF | FFI 封装 | x264 |
-| Windows/Linux (Intel) | QSV | FFI 封装 | x264 |
-| Linux | VAAPI | `va-rs` | x264 |
+| 平台 | 编码器 | 状态 | 说明 |
+|------|--------|------|------|
+| macOS | VideoToolbox (via FFmpeg) | ✅ 已实现 | FFmpeg h264_videotoolbox |
+| Windows | NVENC (via FFmpeg) | ✅ 已实现 | FFmpeg h264_nvenc |
+| Windows | QuickSync (via FFmpeg) | ✅ 已实现 | FFmpeg h264_qsv (Intel) |
+| Linux | VAAPI (via FFmpeg) | ✅ 已实现 | FFmpeg h264_vaapi |
+| Linux | NVENC (via FFmpeg) | ✅ 已实现 | FFmpeg h264_nvenc |
+| 全平台 | libx264 (via FFmpeg) | ✅ 已实现 | FFmpeg 软件编码 (fallback) |
+| 全平台 | OpenH264 | ✅ 已实现 | 最终回退编码器 |
 
-**编码配置**:
+**编码器选择优先级** (自动检测):
+```
+macOS:     VideoToolbox → libx264 → OpenH264
+Windows:   NVENC → QSV → libx264 → OpenH264
+Linux:     NVENC → VAAPI → QSV → libx264 → OpenH264
+```
+
+**实际编码配置**:
 ```rust
 struct EncoderConfig {
-    codec: Codec::H264,           // H264 兼容性最好
-    preset: Preset::UltraFast,    // 最低延迟
-    tune: Tune::ZeroLatency,      // 零延迟调优
-    profile: Profile::Baseline,   // 最简配置
-    bitrate: 8_000_000,           // 8 Mbps
-    max_bitrate: 15_000_000,      // 峰值 15 Mbps
-    fps: 60,
-    gop_size: 60,                 // 1秒一个关键帧
-    b_frames: 0,                  // 禁用 B 帧
-    ref_frames: 1,                // 单参考帧
-    rc_mode: RateControl::CBR,    // 恒定比特率
+    width: u32,
+    height: u32,
+    fps: 30,                      // 默认 30 fps
+    bitrate: 8_000_000,           // 8 Mbps (High)
+    max_bitrate: 16_000_000,      // 峰值 16 Mbps
+    keyframe_interval: 30,        // 1秒一个关键帧
+    preset: EncoderPreset::UltraFast,
 }
 ```
+
+**FFmpeg 编码器特点** (encoder/ffmpeg/mod.rs):
+- 自动检测可用硬件编码器
+- 低延迟配置 (zerolatency tune, CBR rate control)
+- BGRA → YUV420 颜色空间转换
+- 支持动态请求关键帧
+- 硬件编码失败时自动回退到软件
 
 ### 网络传输
 
@@ -245,17 +276,33 @@ struct NetworkConfig {
 }
 ```
 
-### 渲染
+### 渲染 (已实现)
 
 | 组件 | 技术 | 说明 |
 |------|------|------|
-| GPU 渲染 | wgpu | 跨平台 GPU API |
-| 窗口管理 | winit | 独立渲染窗口 |
+| GPU 渲染 | wgpu | 跨平台 GPU API (Vulkan/Metal/DX12) |
+| 窗口管理 | winit | 独立原生渲染窗口 |
+| 帧格式 | BGRA / YUV420 | 支持两种输入格式 |
 
-**渲染优化**:
-- 独立窗口渲染，绕过 WebView 延迟
-- 直接将解码帧上传 GPU 纹理
-- 支持硬件解码输出直接渲染 (零拷贝)
+**渲染架构**:
+```
+观看者点击"观看"
+    → request_screen_stream(peer_ip, peer_name)
+    → 创建 ViewerSession
+    → 收到 ScreenStart
+    → RenderWindow::create() 创建原生窗口
+    → 收到 ScreenFrame
+    → OpenH264 解码 → BGRA 数据
+    → RenderWindowHandle::render_frame()
+    → wgpu 纹理上传 → GPU 渲染
+```
+
+**实现细节**:
+- `RenderWindow` - 独立线程运行的 winit 窗口
+- `RenderWindowHandle` - 跨线程控制句柄 (channel 通信)
+- `WgpuRenderer` - BGRA 纹理 + YUV420 三平面着色器
+- 低延迟 Mailbox 呈现模式
+- 自动丢弃旧帧，保持最新帧显示
 
 ### 远程控制
 
@@ -357,49 +404,10 @@ lan-meeting/
 
 ---
 
-## 通信协议设计
+## 通信协议设计 (已实现)
 
-### 会议室消息
-
-```rust
-/// 会议室相关消息
-enum MeetingMessage {
-    // 会议管理
-    CreateMeeting { meeting_id: String, host_id: String, name: String },
-    JoinMeeting { meeting_id: String, device_id: String, name: String },
-    LeaveMeeting { meeting_id: String, device_id: String },
-    MeetingInfo {
-        meeting_id: String,
-        host_id: String,
-        participants: Vec<Participant>,
-        presenter_id: Option<String>,
-    },
-
-    // 演示者控制
-    RequestPresent { device_id: String },
-    GrantPresent { device_id: String },
-    RevokePresent,
-
-    // 成员管理
-    KickMember { device_id: String, reason: String },
-    MemberJoined { participant: Participant },
-    MemberLeft { device_id: String },
-}
-
-struct Participant {
-    device_id: String,
-    name: String,
-    role: ParticipantRole,
-    joined_at: u64,
-}
-
-enum ParticipantRole {
-    Host,       // 主持人
-    Presenter,  // 演示者
-    Viewer,     // 观看者
-    Controller, // 被授权控制者
-}
-```
+注：原计划的 `MeetingMessage` (会议室管理、主持人、演示者角色) 未实现，
+当前为简化的对等模型，所有设备对等，任意设备可共享屏幕。
 
 ### 消息类型
 ```rust
@@ -534,23 +542,29 @@ struct AdaptiveBitrate {
 - [x] 统一抽象层 (`capture/mod.rs`)
 - [x] 权限检查和请求 (macOS)
 
-### Phase 4: 视频编码 (软件优先) ✅
-- [x] OpenH264 跨平台软件编码 (`encoder/software.rs`)
+### Phase 4: 视频编码 (硬件加速) ✅
+- [x] FFmpeg 硬件编码器 (`encoder/ffmpeg/mod.rs`, via ffmpeg-next)
+  - [x] macOS: VideoToolbox (h264_videotoolbox)
+  - [x] Windows: NVENC (h264_nvenc)
+  - [x] Windows: QuickSync (h264_qsv)
+  - [x] Linux: VAAPI (h264_vaapi)
+  - [x] Linux: NVENC (h264_nvenc)
+  - [x] 软件回退: libx264
+- [x] OpenH264 跨平台软件编码 (`encoder/software.rs`, 最终回退)
 - [x] BGRA 到 YUV420 颜色空间转换
 - [x] 编码器抽象接口 (`VideoEncoder` trait)
-- [ ] macOS: VideoToolbox H264 编码 (硬件)
-- [ ] NVIDIA: NVENC 编码 (硬件)
-- [ ] AMD/Linux: VAAPI 编码 (硬件)
-- [x] 自动编码器选择 (fallback 到软编码)
+- [x] 自动编码器选择 (硬件优先，自动回退)
 
 ### Phase 5: 视频解码 + 渲染 ✅
 - [x] OpenH264 跨平台软件解码 (`decoder/software.rs`)
+- [x] Vulkan Video 硬件解码 (`decoder/vulkan/mod.rs`, via vk-video)
 - [x] 解码器抽象接口 (`VideoDecoder` trait)
+- [x] DecodedFrame 支持 CPU 和 GPU 数据路径
 - [x] wgpu GPU 渲染器 (`renderer/wgpu_renderer.rs`)
 - [x] BGRA 和 YUV420 GPU 着色器
 - [x] 独立渲染窗口 (`renderer/window.rs`)
-- [ ] 各平台硬件解码实现 (VideoToolbox/DXVA/VAAPI)
-- [ ] 解码-渲染零拷贝优化
+- [x] 自动解码器选择 (Vulkan Video → OpenH264)
+- [ ] 零拷贝 GPU 纹理渲染 (待 vk-video 更新到 wgpu 28)
 
 ### Phase 6: 远程控制 ✅
 - [x] 输入事件结构定义 (`input/events.rs`)
@@ -615,56 +629,104 @@ struct AdaptiveBitrate {
 - `is_service_running` - 检查服务状态
 - `get_settings` / `save_settings` - 设置管理
 - `broadcast_sharing_status` - 广播共享状态到所有对等端
-- `open_viewer_window` - 打开观看者窗口
-- `request_control` - 请求远程控制
+- `request_screen_stream` - 请求屏幕流 (创建原生渲染窗口)
+- `stop_viewing_stream` - 停止观看
+- `request_control` - 请求远程控制 (待实现)
 
 **通信改进**:
 - 双向设备发现 (A 添加 B 后，B 的列表也显示 A)
 - 共享状态同步 (ScreenOffer 消息 + sharing-status-changed 事件)
 - 连接后自动监听消息
 
-### Phase 12: 观看者窗口 ✅
-- [x] Vite 多页面配置 (`viewer.html` 入口)
-- [x] 观看者窗口组件 (`src/components/Viewer/index.tsx`)
-- [x] 窗口参数传递 (peer_id, peer_name, peer_ip)
-- [x] 连接状态显示 (连接中/已连接/已断开)
-- [x] 视频画布准备 (canvas 元素)
-- [ ] 请求视频流逻辑
-- [ ] 视频帧接收和解码
-- [ ] 视频渲染到 canvas
+### Phase 12: 观看者窗口 ✅ (已重构为原生渲染)
+- [x] ~~Vite 多页面配置~~ (已弃用，改为原生窗口)
+- [x] ~~观看者 WebView 组件~~ (已弃用)
+- [x] Rust 原生渲染窗口 (`RenderWindow`)
+- [x] 跨线程窗口控制 (`RenderWindowHandle`)
+- [x] wgpu GPU 渲染管线
 
 ### Phase 13: 视频流传输 ✅
 - [x] 发送端: 捕获 → 编码 → 发送 ScreenFrame 消息
-- [x] 接收端: 接收 ScreenFrame → 事件通知前端
+- [x] 接收端: 接收 ScreenFrame → 解码 → GPU渲染
 - [x] 视频流请求协议 (ScreenRequest → ScreenStart)
 - [x] 帧率控制 (基于配置的 FPS)
 - [x] StreamingManager 管理发送端流
-- [x] ViewerSession 管理接收端会话
-- [ ] 前端视频解码渲染 (需要 WebCodecs 或 WASM 解码器)
+- [x] ViewerSession 管理接收端会话 (原生窗口渲染)
+- [x] Rust 端解码渲染 (wgpu 独立窗口)
 - [ ] 自适应码率 (根据网络状况调整)
 - [ ] 关键帧请求机制
 
 **新增模块**:
 - `src-tauri/src/streaming/mod.rs` - 视频流管理模块
   - `StreamingManager` - 发送端流管理 (捕获→编码→发送)
-  - `ViewerSession` - 接收端会话管理 (接收→解码)
+  - `ViewerSession` - 接收端会话管理 (接收→解码→渲染)
   - `StreamingConfig` - 流配置 (FPS、画质、显示器)
   - `Quality` - 画质枚举 (Auto/High/Medium/Low)
 
 **新增命令**:
-- `request_screen_stream` - 请求对方的视频流
+- `request_screen_stream` - 请求对方的视频流 (创建原生渲染窗口)
 - `stop_viewing_stream` - 停止观看视频流
 
 **流程**:
 1. A 开始共享 → 调用 `broadcast_sharing_status(true)`
 2. A 端 StreamingManager 开始捕获、编码、发送 ScreenFrame
-3. B 点击"观看" → 打开 Viewer 窗口
-4. Viewer 调用 `request_screen_stream` → 发送 ScreenRequest
+3. B 点击"观看" → 调用 `request_screen_stream`
+4. `request_screen_stream` 创建 ViewerSession → 发送 ScreenRequest
 5. A 端收到请求 → 发送 ScreenStart 响应
-6. B 端收到 ScreenStart → 状态变为 "streaming"
-7. A 端持续发送 ScreenFrame → B 端通过事件接收
-8. B 端 Viewer 显示帧计数器 (实际渲染待实现)
-9. A 停止共享 → ScreenStop → B 端状态变为 "disconnected"
+6. B 端收到 ScreenStart → 创建原生 wgpu 渲染窗口 → 初始化解码器
+7. A 端持续发送 ScreenFrame → B 端 Rust 解码 → GPU 渲染到原生窗口
+8. A 停止共享 → ScreenStop → B 端关闭渲染窗口
+
+**Rust 端视频解码渲染** (高性能原生方案):
+- `ViewerSession` - 管理解码器和渲染窗口
+- `handle_screen_start()` - 创建 wgpu 原生窗口
+- `handle_screen_frame()` - 解码 H.264 → 上传 GPU → 渲染
+- `RenderWindow` - 独立 winit + wgpu 窗口
+- `RenderWindowHandle` - 跨线程窗口控制
+- 当前使用 OpenH264 软件解码 (硬件解码器待实现)
+- 直接 GPU 纹理上传，无 IPC 开销
+- 比 WebCodecs 方案更高效 (无 Base64 编码、无 Tauri 事件开销)
+
+---
+
+## 当前状态总结
+
+### ✅ 已完成功能
+| 功能 | 说明 |
+|------|------|
+| 设备发现 | mDNS 自动发现 + 手动 IP 添加 |
+| P2P 连接 | QUIC 加密连接，自签名证书 |
+| 屏幕捕获 | macOS/Windows/Linux 原生 API |
+| 视频编码 | FFmpeg 硬件编码 (NVENC/VT/VAAPI/QSV) + OpenH264 回退 |
+| 视频解码 | Vulkan Video 硬件解码 (Win/Linux) + OpenH264 回退 |
+| 视频渲染 | wgpu 原生窗口 GPU 渲染 |
+| 视频流 | 实时传输，帧率控制 |
+| 聊天 | 文本消息广播 |
+| 文件传输 | P2P 分块传输，断点续传 |
+| UI | 会议室模式，成员列表，共享控制 |
+
+### ⏳ 待实现功能
+| 功能 | 优先级 | 说明 |
+|------|--------|------|
+| 零拷贝解码渲染 | 中 | vk-video 升级到 wgpu 28 后启用 |
+| 远程控制 | 中 | 输入模拟已实现，权限管理待做 |
+| 自适应码率 | 中 | 根据网络状况调整 |
+| 关键帧请求 | 低 | 丢帧时请求 I 帧 |
+| 代码高亮 | 低 | 聊天中的代码片段 |
+
+### ❌ 已放弃/简化
+| 原计划 | 实际 |
+|--------|------|
+| 主持人角色 | 对等模型，无主持人 |
+| 演示者/观看者角色 | 任意成员可共享，任意成员可观看 |
+| 会议室管理 | 简化为设备列表 |
+| WebView 视频渲染 | 改为 Rust 原生 wgpu 窗口 |
+
+### ⏸️ 暂缓功能
+| 功能 | 原因 |
+|------|------|
+| macOS Vulkan 解码 | vk-video 不支持 macOS (Metal only) |
+| 零拷贝 GPU 纹理 | vk-video 使用 wgpu 24, 我们用 wgpu 28 |
 
 ---
 
@@ -753,8 +815,17 @@ Linux 屏幕捕获，支持 X11 后端。
 - `EncodedFrame` - 编码后的帧数据
 - `create_encoder()` - 自动选择最佳编码器
 
+### encoder/ffmpeg/mod.rs
+FFmpeg 硬件加速编码器 (via ffmpeg-next)。
+- `FfmpegEncoder` - 统一 FFmpeg 编码器
+- `HwEncoderType` - 硬件编码器类型枚举
+- 自动检测最佳可用编码器
+- 支持: NVENC, VideoToolbox, VAAPI, QSV, libx264
+- BGRA → YUV420 颜色转换
+- 低延迟配置 (zerolatency, CBR)
+
 ### encoder/software.rs
-OpenH264 软件编码器。
+OpenH264 软件编码器 (最终回退)。
 - `SoftwareEncoder` - 跨平台 H.264 软编码
 - BGRA → YUV420 颜色转换
 - 支持强制关键帧
@@ -763,11 +834,21 @@ OpenH264 软件编码器。
 视频解码抽象层。
 - `VideoDecoder` trait - 统一解码接口
 - `DecoderConfig` - 解码配置 (分辨率、输出格式等)
-- `DecodedFrame` - 解码后的帧数据 (BGRA 或 YUV420)
+- `DecodedFrameData` - 支持 CPU 和 GPU 数据路径
+- `DecodedFrame` - 解码后的帧数据
 - `create_decoder()` - 自动选择最佳解码器
 
+### decoder/vulkan/mod.rs
+Vulkan Video 硬件解码器 (via vk-video)。
+- `VulkanDecoder` - Vulkan Video H.264 解码
+- 支持 Windows 和 Linux (NVIDIA/AMD)
+- macOS 不支持 (返回 HardwareNotAvailable)
+- NV12 → BGRA/YUV420 颜色转换
+- 当前: CPU 输出路径
+- 未来: 零拷贝 GPU 纹理 (待 vk-video 升级到 wgpu 28)
+
 ### decoder/software.rs
-OpenH264 软件解码器。
+OpenH264 软件解码器 (回退)。
 - `SoftwareDecoder` - 跨平台 H.264 软解码
 - YUV420 → BGRA 颜色转换
 - 支持 YUV420 直出 (用于 GPU 渲染)
@@ -828,10 +909,13 @@ macOS 辅助功能权限。
   - `stop_sync()` - 停止流
   - `is_streaming()` - 检查是否正在流
   - `frame_count()` - 获取已发送帧数
-- `ViewerSession` - 接收端会话
-  - `handle_screen_start()` - 处理 ScreenStart 消息
-  - `handle_screen_frame()` - 处理 ScreenFrame 消息
-  - `handle_screen_stop()` - 处理 ScreenStop 消息
+- `ViewerSession` - 接收端会话 (原生窗口渲染)
+  - `handle_screen_start()` - 创建 wgpu 原生窗口，初始化解码器
+  - `handle_screen_frame()` - 解码 H.264 帧，渲染到 GPU 窗口
+  - `handle_screen_stop()` - 关闭渲染窗口
+  - `close()` - 手动关闭会话
+  - `is_window_open()` - 检查窗口是否仍打开
+  - `frame_count()` - 获取已解码帧数
 - `StreamingConfig` - 流配置 (fps, quality, display_id)
 - `Quality` - 画质枚举 (Auto=8Mbps, High=8Mbps, Medium=4Mbps, Low=2Mbps)
 - `request_screen_stream()` - 发送流请求
@@ -846,12 +930,12 @@ macOS 辅助功能权限。
    - 帧率控制 (根据配置的 FPS)
 4. 停止时发送 ScreenStop 消息
 
-**接收流程**:
-1. Viewer 窗口打开 → `request_screen_stream()`
-2. 发送 ScreenRequest 消息
-3. 接收 ScreenStart → 初始化解码器
-4. 接收 ScreenFrame → 通过事件通知前端
-5. 接收 ScreenStop → 会话结束
+**接收流程** (Rust 原生渲染):
+1. 用户点击"观看" → `request_screen_stream(peer_ip, peer_name)`
+2. 创建 ViewerSession (解码器初始化) → 发送 ScreenRequest 消息
+3. 接收 ScreenStart → 创建 wgpu 原生渲染窗口
+4. 接收 ScreenFrame → Rust 解码 → GPU 纹理上传 → 渲染
+5. 接收 ScreenStop 或用户关闭窗口 → 会话结束
 
 ### transfer/mod.rs
 文件传输模块，支持 P2P 文件共享和断点续传。
@@ -906,12 +990,14 @@ macOS 辅助功能权限。
 - 连接验证
 - 调用后端: `add_manual_device`
 
-**Viewer/index.tsx** - 视频观看窗口
-- URL 参数解析 (peer_id, peer_name, peer_ip)
-- 连接状态显示
-- 视频 canvas 渲染
-- 全屏/请求控制按钮
-- 调用后端: `request_control` (待实现)
+**Viewer/index.tsx** - 视频观看窗口 (已弃用，视频由 Rust 原生窗口渲染)
+- 原本使用 WebCodecs API 解码渲染，现已改为 Rust 端原生渲染
+- 视频现在通过 wgpu 独立窗口渲染，无需 WebView
+
+**MeetingRoom/index.tsx** - 会议室主界面 (观看功能)
+- 点击"观看"按钮 → 调用 `request_screen_stream`
+- Rust 端创建原生 wgpu 窗口进行视频渲染
+- 调用后端: `request_screen_stream` (创建原生渲染窗口)
 
 **DeviceList/index.tsx** - 设备发现和连接 (旧版)
 - 设备列表显示 (状态指示器: 在线/忙碌/离线)

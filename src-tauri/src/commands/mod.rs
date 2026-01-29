@@ -709,19 +709,15 @@ pub async fn broadcast_sharing_status(is_sharing: bool, display_id: Option<u32>)
     Ok(())
 }
 
-/// Request screen stream from a peer
+/// Request screen stream from a peer (creates native render window)
 #[tauri::command]
-pub async fn request_screen_stream(peer_ip: String) -> Result<(), String> {
+pub async fn request_screen_stream(peer_ip: String, peer_name: String) -> Result<(), String> {
     use crate::streaming;
-    use tokio::sync::mpsc;
 
-    log::info!("Requesting screen stream from {}", peer_ip);
+    log::info!("Requesting screen stream from {} ({})", peer_name, peer_ip);
 
-    // Create a frame channel (frames will be sent via events)
-    let (frame_tx, _frame_rx) = mpsc::channel(10);
-
-    // Create viewer session
-    streaming::create_viewer_session(peer_ip.clone(), frame_tx)
+    // Create viewer session (native window will be created on ScreenStart)
+    streaming::create_viewer_session(peer_ip.clone(), peer_name)
         .map_err(|e| format!("Failed to create viewer session: {}", e))?;
 
     // Send request to peer

@@ -336,100 +336,53 @@ async fn handle_message(
                 codec
             );
 
-            // Initialize viewer session
+            // Initialize viewer session and create native render window
             let sessions = streaming::get_viewer_sessions();
             if let Some(session) = sessions.write().get_mut(&remote_ip) {
-                if let Err(e) = session.handle_screen_start(*width, *height, *fps, codec) {
-                    log::error!("Failed to start viewer session: {}", e);
+                match session.handle_screen_start(*width, *height, *fps, codec) {
+                    Ok(_) => {
+                        log::info!("Native viewer window created for {}", remote_ip);
+                    }
+                    Err(e) => {
+                        log::error!("Failed to start viewer session: {}", e);
+                    }
                 }
-            }
-
-            // Emit event to frontend
-            if let Some(handle) = APP_HANDLE.get() {
-                #[derive(serde::Serialize, Clone)]
-                struct ScreenStartEvent {
-                    peer_ip: String,
-                    width: u32,
-                    height: u32,
-                    fps: u8,
-                    codec: String,
-                }
-                let _ = handle.emit("screen-start", ScreenStartEvent {
-                    peer_ip: remote_ip,
-                    width: *width,
-                    height: *height,
-                    fps: *fps,
-                    codec: codec.clone(),
-                });
+            } else {
+                log::warn!("No viewer session found for {}", remote_ip);
             }
         }
 
-        Message::ScreenFrame { timestamp, frame_type, sequence, data } => {
+        Message::ScreenFrame { timestamp, frame_type: _, sequence, data } => {
             let remote_ip = _conn.remote_addr().ip().to_string();
 
-            // Handle frame in viewer session (without holding lock across await)
+            // Decode and render frame in native window (no Tauri event overhead)
             let sessions = streaming::get_viewer_sessions();
-            let session_active = {
-                let sessions_read = sessions.read();
-                sessions_read.get(&remote_ip).map(|s| s.is_active()).unwrap_or(false)
-            };
+            let mut sessions_guard = sessions.write();
 
-            if session_active {
-                // Note: For now we skip the async decode since we're sending raw H264 data
-                // A proper implementation would decode in a separate task
-            }
-
-            // Emit frame event to frontend (with base64 encoded data for simplicity)
-            // In production, we'd use a more efficient method like shared memory
-            if let Some(handle) = APP_HANDLE.get() {
-                #[derive(serde::Serialize, Clone)]
-                struct ScreenFrameEvent {
-                    peer_ip: String,
-                    timestamp: u64,
-                    frame_type: String,
-                    sequence: u32,
-                    data: String, // Base64 encoded
-                }
-
-                let frame_type_str = match frame_type {
-                    network::protocol::FrameType::KeyFrame => "keyframe",
-                    network::protocol::FrameType::DeltaFrame => "delta",
-                };
-
-                if session_active {
-                    // For now, emit the raw H264 data encoded as base64
-                    // The frontend will need to decode this
-                    use base64::{Engine, engine::general_purpose::STANDARD};
-                    let _ = handle.emit("screen-frame", ScreenFrameEvent {
-                        peer_ip: remote_ip,
-                        timestamp: *timestamp,
-                        frame_type: frame_type_str.to_string(),
-                        sequence: *sequence,
-                        data: STANDARD.encode(data),
-                    });
+            if let Some(session) = sessions_guard.get_mut(&remote_ip) {
+                if session.is_active() {
+                    // Decode and render directly to native wgpu window
+                    if let Err(e) = session.handle_screen_frame(*timestamp, data) {
+                        // Only log occasional errors to avoid spam
+                        if *sequence % 100 == 0 {
+                            log::warn!("Frame {} decode error: {}", sequence, e);
+                        }
+                    }
                 }
             }
+
+            // Drop lock before any other operations
+            drop(sessions_guard);
         }
 
         Message::ScreenStop => {
             let remote_ip = _conn.remote_addr().ip().to_string();
             log::info!("Received screen stop from {}", remote_ip);
 
-            // Stop viewer session
+            // Stop viewer session (closes native window)
             let sessions = streaming::get_viewer_sessions();
             if let Some(session) = sessions.write().get_mut(&remote_ip) {
                 session.handle_screen_stop();
-            }
-
-            // Emit event to frontend
-            if let Some(handle) = APP_HANDLE.get() {
-                #[derive(serde::Serialize, Clone)]
-                struct ScreenStopEvent {
-                    peer_ip: String,
-                }
-                let _ = handle.emit("screen-stop", ScreenStopEvent {
-                    peer_ip: remote_ip,
-                });
             }
         }
 

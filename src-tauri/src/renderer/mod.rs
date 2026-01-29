@@ -5,7 +5,7 @@ mod wgpu_renderer;
 mod window;
 
 pub use wgpu_renderer::WgpuRenderer;
-pub use window::{RenderWindow, WindowEvent};
+pub use window::{RenderWindow, RenderWindowHandle, WindowEvent};
 
 use thiserror::Error;
 

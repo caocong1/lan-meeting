@@ -146,17 +146,17 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
-  // Watch member's screen
+  // Watch member's screen (opens native GPU-rendered window)
   const handleWatchScreen = async (member: Member) => {
     try {
-      await invoke("open_viewer_window", {
-        peerId: member.id,
-        peerName: member.name,
+      // Request stream - native wgpu window will be created when stream starts
+      await invoke("request_screen_stream", {
         peerIp: member.ip,
+        peerName: member.name,
       });
     } catch (e) {
-      console.error("Failed to open viewer:", e);
-      setError(`打开观看窗口失败: ${e}`);
+      console.error("Failed to request screen stream:", e);
+      setError(`请求屏幕流失败: ${e}`);
     }
   };
 

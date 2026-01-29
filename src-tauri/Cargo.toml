@@ -51,8 +51,12 @@ winit = "0.30"              # Window management
 image = "0.25"
 
 # Video encoding
-openh264 = "0.6"           # Cisco OpenH264 software encoder
+openh264 = "0.6"           # Cisco OpenH264 software encoder (fallback)
 lz4_flex = "0.11"          # Fast compression for raw frames
+
+# Hardware-accelerated video codecs
+ffmpeg-next = "8.0"        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
+vk-video = "0.1"           # Vulkan Video decoding with wgpu integration (zero-copy)
 
 # Utilities
 thiserror = "2"

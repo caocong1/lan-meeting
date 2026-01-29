@@ -1,6 +1,10 @@
 // Video encoder module
 // Hardware encoding with software fallback
 
+pub mod ffmpeg;
+pub mod software;
+
+// Legacy platform-specific stubs (kept for reference)
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
 
@@ -9,8 +13,6 @@ pub mod nvenc;
 
 #[cfg(target_os = "linux")]
 pub mod vaapi;
-
-pub mod software;
 
 use thiserror::Error;
 
@@ -91,42 +93,16 @@ pub trait VideoEncoder: Send + Sync {
 
 /// Create the best available encoder for this platform
 pub fn create_encoder() -> Result<Box<dyn VideoEncoder>, EncoderError> {
-    // Try hardware encoders first, fall back to software
-
-    #[cfg(target_os = "macos")]
-    {
-        match videotoolbox::VideoToolboxEncoder::new() {
-            Ok(enc) => {
-                log::info!("Using VideoToolbox hardware encoder");
-                return Ok(Box::new(enc));
-            }
-            Err(e) => log::warn!("VideoToolbox not available: {}", e),
+    // Try FFmpeg hardware-accelerated encoder first
+    match ffmpeg::FfmpegEncoder::new() {
+        Ok(enc) => {
+            log::info!("Using FFmpeg encoder: {}", enc.info());
+            return Ok(Box::new(enc));
         }
+        Err(e) => log::warn!("FFmpeg encoder not available: {}", e),
     }
 
-    #[cfg(target_os = "windows")]
-    {
-        match nvenc::NvencEncoder::new() {
-            Ok(enc) => {
-                log::info!("Using NVENC hardware encoder");
-                return Ok(Box::new(enc));
-            }
-            Err(e) => log::warn!("NVENC not available: {}", e),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        match vaapi::VaapiEncoder::new() {
-            Ok(enc) => {
-                log::info!("Using VAAPI hardware encoder");
-                return Ok(Box::new(enc));
-            }
-            Err(e) => log::warn!("VAAPI not available: {}", e),
-        }
-    }
-
-    // Fall back to software encoder
-    log::info!("Using software encoder (x264)");
+    // Fall back to OpenH264 software encoder
+    log::info!("Using OpenH264 software encoder");
     Ok(Box::new(software::SoftwareEncoder::new()?))
 }

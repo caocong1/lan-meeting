@@ -2,10 +2,11 @@
 //! Handles capture → encode → send and receive → decode pipelines
 
 use crate::capture::ScreenCapture;
-use crate::decoder::{DecodedFrame, DecoderConfig, OutputFormat, VideoDecoder};
+use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
 use crate::encoder::{EncoderConfig, EncoderPreset, FrameType};
 use crate::network::protocol::{self, Message};
 use crate::network::quic;
+use crate::renderer::{RenderFrame, RenderWindow, RenderWindowHandle};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -296,31 +297,36 @@ impl StreamingManager {
 }
 
 /// Viewer session for the receiving side
+/// Uses native wgpu window for efficient GPU rendering
 pub struct ViewerSession {
     peer_ip: String,
+    peer_name: String,
     decoder: Box<dyn VideoDecoder>,
+    window_handle: Option<RenderWindowHandle>,
     width: u32,
     height: u32,
     is_active: bool,
-    frame_tx: mpsc::Sender<DecodedFrame>,
+    frame_count: u32,
 }
 
 impl ViewerSession {
-    pub fn new(peer_ip: String, frame_tx: mpsc::Sender<DecodedFrame>) -> Result<Self, StreamingError> {
+    pub fn new(peer_ip: String, peer_name: String) -> Result<Self, StreamingError> {
         let decoder = crate::decoder::create_decoder()
             .map_err(|e| StreamingError::DecoderError(e.to_string()))?;
 
         Ok(Self {
             peer_ip,
+            peer_name,
             decoder,
+            window_handle: None,
             width: 0,
             height: 0,
             is_active: false,
-            frame_tx,
+            frame_count: 0,
         })
     }
 
-    /// Handle ScreenStart message
+    /// Handle ScreenStart message - creates native render window
     pub fn handle_screen_start(
         &mut self,
         width: u32,
@@ -338,6 +344,7 @@ impl ViewerSession {
         self.width = width;
         self.height = height;
 
+        // Initialize decoder with BGRA output for direct GPU upload
         let config = DecoderConfig {
             width,
             height,
@@ -348,12 +355,21 @@ impl ViewerSession {
             .init(config)
             .map_err(|e| StreamingError::DecoderError(e.to_string()))?;
 
+        // Create native render window
+        let title = format!("{} 的屏幕 ({})", self.peer_name, self.peer_ip);
+        let window_handle = RenderWindow::create(&title, width, height)
+            .map_err(|e| StreamingError::DecoderError(format!("Failed to create window: {}", e)))?;
+
+        self.window_handle = Some(window_handle);
         self.is_active = true;
+        self.frame_count = 0;
+
+        log::info!("Native render window created for {}", self.peer_ip);
         Ok(())
     }
 
-    /// Handle ScreenFrame message
-    pub async fn handle_screen_frame(
+    /// Handle ScreenFrame message - decode and render to native window
+    pub fn handle_screen_frame(
         &mut self,
         timestamp: u64,
         data: &[u8],
@@ -362,14 +378,51 @@ impl ViewerSession {
             return Err(StreamingError::NotStreaming);
         }
 
+        // Check if window is still open
+        if let Some(ref handle) = self.window_handle {
+            if !handle.is_open() {
+                log::info!("Render window closed by user");
+                self.is_active = false;
+                return Err(StreamingError::NotStreaming);
+            }
+        }
+
         // Decode frame
-        if let Some(frame) = self
+        if let Some(decoded) = self
             .decoder
             .decode(data, timestamp)
             .map_err(|e| StreamingError::DecoderError(e.to_string()))?
         {
-            // Send to renderer
-            let _ = self.frame_tx.send(frame).await;
+            // Convert DecodedFrame to RenderFrame based on data type
+            let render_frame = if let Some(cpu_data) = decoded.cpu_data() {
+                match decoded.format {
+                    OutputFormat::BGRA => RenderFrame::from_bgra(
+                        decoded.width,
+                        decoded.height,
+                        cpu_data.to_vec(),
+                    ),
+                    OutputFormat::YUV420 => RenderFrame::from_yuv420(
+                        decoded.width,
+                        decoded.height,
+                        cpu_data.to_vec(),
+                        decoded.strides().unwrap_or([decoded.width as usize, decoded.width as usize / 2, decoded.width as usize / 2]),
+                    ),
+                }
+            } else {
+                // GPU texture path - not yet implemented
+                // TODO: When vk-video updates to wgpu 28, add zero-copy texture rendering
+                log::warn!("GPU texture frames not yet supported");
+                return Ok(());
+            };
+
+            // Send to native window for GPU rendering
+            if let Some(ref handle) = self.window_handle {
+                if let Err(e) = handle.render_frame(render_frame) {
+                    log::warn!("Failed to render frame: {}", e);
+                }
+            }
+
+            self.frame_count += 1;
         }
 
         Ok(())
@@ -379,6 +432,20 @@ impl ViewerSession {
     pub fn handle_screen_stop(&mut self) {
         log::info!("Viewer session stopped for {}", self.peer_ip);
         self.is_active = false;
+
+        // Close the render window
+        if let Some(ref handle) = self.window_handle {
+            handle.close();
+        }
+    }
+
+    /// Close the viewer session
+    pub fn close(&mut self) {
+        self.is_active = false;
+        if let Some(ref handle) = self.window_handle {
+            handle.close();
+        }
+        self.window_handle = None;
     }
 
     /// Check if active
@@ -386,9 +453,19 @@ impl ViewerSession {
         self.is_active
     }
 
+    /// Check if window is open
+    pub fn is_window_open(&self) -> bool {
+        self.window_handle.as_ref().map(|h| h.is_open()).unwrap_or(false)
+    }
+
     /// Get dimensions
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
+    }
+
+    /// Get frame count
+    pub fn frame_count(&self) -> u32 {
+        self.frame_count
     }
 }
 
@@ -401,19 +478,22 @@ pub fn get_viewer_sessions() -> Arc<RwLock<HashMap<String, ViewerSession>>> {
     VIEWER_SESSIONS.clone()
 }
 
-/// Create a viewer session for a peer
+/// Create a viewer session for a peer (window created on ScreenStart)
 pub fn create_viewer_session(
     peer_ip: String,
-    frame_tx: mpsc::Sender<DecodedFrame>,
+    peer_name: String,
 ) -> Result<(), StreamingError> {
-    let session = ViewerSession::new(peer_ip.clone(), frame_tx)?;
+    let session = ViewerSession::new(peer_ip.clone(), peer_name)?;
     VIEWER_SESSIONS.write().insert(peer_ip, session);
     Ok(())
 }
 
 /// Remove a viewer session
 pub fn remove_viewer_session(peer_ip: &str) {
-    VIEWER_SESSIONS.write().remove(peer_ip);
+    let mut sessions = VIEWER_SESSIONS.write();
+    if let Some(mut session) = sessions.remove(peer_ip) {
+        session.close();
+    }
 }
 
 /// Request screen stream from a peer
