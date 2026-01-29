@@ -179,6 +179,39 @@ async fn handle_message(
                 capabilities
             );
 
+            // Add the remote device to our device list
+            let remote_addr = _conn.remote_addr();
+            let remote_device = network::discovery::DiscoveredDevice {
+                id: device_id.clone(),
+                name: name.clone(),
+                ip: remote_addr.ip().to_string(),
+                port: remote_addr.port(),
+                status: network::discovery::DeviceStatus::Busy, // Connected = Busy
+                last_seen: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            };
+            network::discovery::add_device(remote_device.clone());
+
+            // Emit event to frontend to notify about the new connection
+            if let Some(handle) = APP_HANDLE.get() {
+                #[derive(serde::Serialize, Clone)]
+                struct ConnectionEvent {
+                    device_id: String,
+                    device_name: String,
+                    ip: String,
+                }
+                let _ = handle.emit("connection-received", ConnectionEvent {
+                    device_id: device_id.clone(),
+                    device_name: name.clone(),
+                    ip: remote_addr.ip().to_string(),
+                });
+
+                // Also emit device-discovered so the device list updates
+                let _ = handle.emit("device-discovered", &remote_device);
+            }
+
             // Send handshake acknowledgment
             let our_id = network::discovery::get_our_device_id();
             let our_name = hostname::get()
@@ -189,7 +222,7 @@ async fn handle_message(
             let encoded = protocol::encode(&ack)?;
             stream.send_framed(&encoded).await?;
 
-            log::info!("Handshake accepted, sent acknowledgment");
+            log::info!("Handshake accepted from {}, sent acknowledgment", name);
         }
 
         Message::HandshakeAck {

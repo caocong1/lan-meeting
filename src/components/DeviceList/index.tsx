@@ -19,6 +19,7 @@ export const DeviceList: Component = () => {
 
   let unlistenDiscovered: UnlistenFn | undefined;
   let unlistenRemoved: UnlistenFn | undefined;
+  let unlistenConnection: UnlistenFn | undefined;
 
   const statusColors = {
     online: "bg-green-500",
@@ -74,6 +75,18 @@ export const DeviceList: Component = () => {
       handleDeviceRemoved(event.payload);
     });
 
+    // Listen for incoming connections
+    unlistenConnection = await listen<{ device_id: string; device_name: string; ip: string }>(
+      "connection-received",
+      (event) => {
+        console.log("Connection received:", event.payload);
+        // Show notification about incoming connection
+        setError(null); // Clear any previous error
+        // Could add a toast notification here
+        alert(`${event.payload.device_name} (${event.payload.ip}) 已连接到你的设备`);
+      }
+    );
+
     // Initial fetch
     await fetchDevices();
   });
@@ -82,6 +95,7 @@ export const DeviceList: Component = () => {
   onCleanup(() => {
     unlistenDiscovered?.();
     unlistenRemoved?.();
+    unlistenConnection?.();
   });
 
   const handleConnect = async (device: Device) => {
@@ -127,9 +141,9 @@ export const DeviceList: Component = () => {
         </div>
       )}
 
-      {/* Manual Connection */}
+      {/* Manual Add Device */}
       <div class="card">
-        <h2 class="text-lg font-semibold text-gray-900 mb-4">手动连接</h2>
+        <h2 class="text-lg font-semibold text-gray-900 mb-4">手动添加设备</h2>
         <div class="flex gap-3">
           <input
             type="text"
@@ -140,10 +154,11 @@ export const DeviceList: Component = () => {
             class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
           />
           <button class="btn-primary" onClick={handleManualConnect}>
-            <span class="i-lucide-link mr-2"></span>
-            连接
+            <span class="i-lucide-plus mr-2"></span>
+            添加
           </button>
         </div>
+        <p class="text-xs text-gray-500 mt-2">添加设备后会自动验证连通性</p>
       </div>
 
       {/* Device List */}
@@ -195,13 +210,20 @@ export const DeviceList: Component = () => {
                     </span>
                   </div>
 
-                  <button
-                    class="btn-primary text-sm"
-                    disabled={device.status === "offline"}
-                    onClick={() => handleConnect(device)}
-                  >
-                    {device.status === "busy" ? "请求控制" : "连接"}
-                  </button>
+                  {device.status === "busy" ? (
+                    <span class="px-3 py-1.5 bg-green-100 text-green-700 text-sm rounded-lg flex items-center gap-1">
+                      <span class="i-lucide-check-circle"></span>
+                      已连接
+                    </span>
+                  ) : (
+                    <button
+                      class="btn-primary text-sm"
+                      disabled={device.status === "offline"}
+                      onClick={() => handleConnect(device)}
+                    >
+                      建立连接
+                    </button>
+                  )}
                 </div>
               </div>
             )}
