@@ -6,6 +6,7 @@ use crate::network::quic;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
+use tauri::Manager;
 
 /// Display information for screen capture
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -660,15 +661,48 @@ pub async fn broadcast_sharing_status(is_sharing: bool) -> Result<(), String> {
 /// Open viewer window to watch a peer's screen
 #[tauri::command]
 pub async fn open_viewer_window(
-    _peer_id: String,
+    app_handle: tauri::AppHandle,
+    peer_id: String,
     peer_name: String,
     peer_ip: String,
 ) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
     log::info!("Opening viewer window for {} ({})", peer_name, peer_ip);
 
-    // TODO: Create a new window to view the peer's screen
-    // For now, just log and return
-    log::warn!("Viewer window not yet implemented");
+    // Create unique window label
+    let window_label = format!("viewer-{}", peer_id.replace(".", "-").replace(":", "-"));
+
+    // Check if window already exists
+    if let Some(window) = app_handle.get_webview_window(&window_label) {
+        log::info!("Viewer window already exists, focusing it");
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    // Create viewer URL with query parameters
+    let viewer_url = format!(
+        "/viewer.html?peer_id={}&peer_name={}&peer_ip={}",
+        urlencoding::encode(&peer_id),
+        urlencoding::encode(&peer_name),
+        urlencoding::encode(&peer_ip)
+    );
+
+    // Create new window
+    let _window = WebviewWindowBuilder::new(
+        &app_handle,
+        &window_label,
+        WebviewUrl::App(viewer_url.into()),
+    )
+    .title(format!("{} 的屏幕", peer_name))
+    .inner_size(1280.0, 720.0)
+    .min_inner_size(640.0, 480.0)
+    .resizable(true)
+    .center()
+    .build()
+    .map_err(|e| format!("Failed to create viewer window: {}", e))?;
+
+    log::info!("Viewer window created: {}", window_label);
 
     Ok(())
 }
