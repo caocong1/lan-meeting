@@ -620,12 +620,63 @@ static IS_SHARING: once_cell::sync::Lazy<parking_lot::RwLock<bool>> =
 
 /// Broadcast sharing status to all connected peers
 #[tauri::command]
-pub async fn broadcast_sharing_status(is_sharing: bool) -> Result<(), String> {
+pub async fn broadcast_sharing_status(is_sharing: bool, display_id: Option<u32>) -> Result<(), String> {
     use crate::network::protocol;
+    use crate::streaming::{get_streaming_manager, StreamingConfig, Quality, StreamingManager};
 
-    log::info!("Broadcasting sharing status: {}", is_sharing);
+    log::info!("Broadcasting sharing status: {} (display: {:?})", is_sharing, display_id);
 
     *IS_SHARING.write() = is_sharing;
+
+    // Start or stop streaming
+    if is_sharing {
+        // Start streaming
+        let capture = crate::capture::create_capture()
+            .map_err(|e| format!("Failed to create capture: {}", e))?;
+
+        let settings = SETTINGS.read().clone();
+        let config = StreamingConfig {
+            fps: settings.fps,
+            quality: match settings.quality.as_str() {
+                "high" => Quality::High,
+                "medium" => Quality::Medium,
+                "low" => Quality::Low,
+                _ => Quality::Auto,
+            },
+            display_id: display_id.unwrap_or(0),
+        };
+
+        // Initialize manager if needed (sync operation)
+        {
+            let manager_arc = get_streaming_manager();
+            let mut manager = manager_arc.write();
+            if manager.is_none() {
+                *manager = Some(StreamingManager::new());
+            }
+        }
+
+        // Start streaming (spawns a background task, doesn't need to hold lock long)
+        let manager_arc = get_streaming_manager();
+        let start_result = {
+            let mut manager = manager_arc.write();
+            if let Some(ref mut m) = *manager {
+                Some(m.start_sync(config, capture))
+            } else {
+                None
+            }
+        };
+
+        if let Some(result) = start_result {
+            result.map_err(|e| format!("Failed to start streaming: {}", e))?;
+        }
+    } else {
+        // Stop streaming (sync operation)
+        let manager_arc = get_streaming_manager();
+        let mut manager = manager_arc.write();
+        if let Some(ref mut m) = *manager {
+            m.stop_sync();
+        }
+    }
 
     // Create sharing status message
     let msg = protocol::Message::ScreenOffer {
@@ -655,6 +706,39 @@ pub async fn broadcast_sharing_status(is_sharing: bool) -> Result<(), String> {
         log::info!("Sharing status broadcast to {} peers", success_count);
     }
 
+    Ok(())
+}
+
+/// Request screen stream from a peer
+#[tauri::command]
+pub async fn request_screen_stream(peer_ip: String) -> Result<(), String> {
+    use crate::streaming;
+    use tokio::sync::mpsc;
+
+    log::info!("Requesting screen stream from {}", peer_ip);
+
+    // Create a frame channel (frames will be sent via events)
+    let (frame_tx, _frame_rx) = mpsc::channel(10);
+
+    // Create viewer session
+    streaming::create_viewer_session(peer_ip.clone(), frame_tx)
+        .map_err(|e| format!("Failed to create viewer session: {}", e))?;
+
+    // Send request to peer
+    streaming::request_screen_stream(&peer_ip, 0)
+        .await
+        .map_err(|e| format!("Failed to request stream: {}", e))?;
+
+    Ok(())
+}
+
+/// Stop viewing a screen stream
+#[tauri::command]
+pub fn stop_viewing_stream(peer_ip: String) -> Result<(), String> {
+    use crate::streaming;
+
+    log::info!("Stopping stream viewer for {}", peer_ip);
+    streaming::remove_viewer_session(&peer_ip);
     Ok(())
 }
 

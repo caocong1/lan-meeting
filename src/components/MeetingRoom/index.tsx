@@ -116,7 +116,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
       // For now, use first display. TODO: Show selection UI
       const displayId = displays[0].id;
       await invoke("start_capture", { displayId });
-      await invoke("broadcast_sharing_status", { isSharing: true });
+      await invoke("broadcast_sharing_status", { isSharing: true, displayId });
       setIsSharing(true);
 
       // Update self in member list
@@ -133,7 +133,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
   const handleStopSharing = async () => {
     try {
       await invoke("stop_capture");
-      await invoke("broadcast_sharing_status", { isSharing: false });
+      await invoke("broadcast_sharing_status", { isSharing: false, displayId: null });
       setIsSharing(false);
 
       // Update self in member list

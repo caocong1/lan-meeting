@@ -9,6 +9,7 @@ pub mod encoder;
 pub mod input;
 pub mod network;
 pub mod renderer;
+pub mod streaming;
 pub mod transfer;
 
 use network::quic::QuicEndpoint;
@@ -87,6 +88,8 @@ pub fn run() {
             commands::broadcast_sharing_status,
             commands::open_viewer_window,
             commands::request_control,
+            commands::request_screen_stream,
+            commands::stop_viewing_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -290,11 +293,144 @@ async fn handle_message(
             }
         }
 
-        Message::ScreenRequest { .. }
-        | Message::ScreenStart { .. }
-        | Message::ScreenFrame { .. }
-        | Message::ScreenStop => {
-            log::debug!("Screen sharing message received (not yet implemented)");
+        Message::ScreenRequest { display_id, preferred_fps, preferred_quality } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            log::info!(
+                "Received screen request from {}: display={}, fps={}, quality={}",
+                remote_ip,
+                display_id,
+                preferred_fps,
+                preferred_quality
+            );
+
+            // Check if we are sharing
+            let manager = streaming::get_streaming_manager();
+            let is_streaming = manager.read().as_ref().map(|m| m.is_streaming()).unwrap_or(false);
+
+            if is_streaming {
+                // Send ScreenStart response
+                let (width, height) = manager.read().as_ref().map(|m| m.dimensions()).unwrap_or((1920, 1080));
+                let fps = manager.read().as_ref().map(|m| m.config().fps).unwrap_or(30);
+
+                let start_msg = network::protocol::Message::ScreenStart {
+                    width,
+                    height,
+                    fps: fps as u8,
+                    codec: "h264".to_string(),
+                };
+
+                if let Ok(encoded) = network::protocol::encode(&start_msg) {
+                    let _ = stream.send_framed(&encoded).await;
+                }
+            }
+        }
+
+        Message::ScreenStart { width, height, fps, codec } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            log::info!(
+                "Received screen start from {}: {}x{} @ {} fps, codec={}",
+                remote_ip,
+                width,
+                height,
+                fps,
+                codec
+            );
+
+            // Initialize viewer session
+            let sessions = streaming::get_viewer_sessions();
+            if let Some(session) = sessions.write().get_mut(&remote_ip) {
+                if let Err(e) = session.handle_screen_start(*width, *height, *fps, codec) {
+                    log::error!("Failed to start viewer session: {}", e);
+                }
+            }
+
+            // Emit event to frontend
+            if let Some(handle) = APP_HANDLE.get() {
+                #[derive(serde::Serialize, Clone)]
+                struct ScreenStartEvent {
+                    peer_ip: String,
+                    width: u32,
+                    height: u32,
+                    fps: u8,
+                    codec: String,
+                }
+                let _ = handle.emit("screen-start", ScreenStartEvent {
+                    peer_ip: remote_ip,
+                    width: *width,
+                    height: *height,
+                    fps: *fps,
+                    codec: codec.clone(),
+                });
+            }
+        }
+
+        Message::ScreenFrame { timestamp, frame_type, sequence, data } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+
+            // Handle frame in viewer session (without holding lock across await)
+            let sessions = streaming::get_viewer_sessions();
+            let session_active = {
+                let sessions_read = sessions.read();
+                sessions_read.get(&remote_ip).map(|s| s.is_active()).unwrap_or(false)
+            };
+
+            if session_active {
+                // Note: For now we skip the async decode since we're sending raw H264 data
+                // A proper implementation would decode in a separate task
+            }
+
+            // Emit frame event to frontend (with base64 encoded data for simplicity)
+            // In production, we'd use a more efficient method like shared memory
+            if let Some(handle) = APP_HANDLE.get() {
+                #[derive(serde::Serialize, Clone)]
+                struct ScreenFrameEvent {
+                    peer_ip: String,
+                    timestamp: u64,
+                    frame_type: String,
+                    sequence: u32,
+                    data: String, // Base64 encoded
+                }
+
+                let frame_type_str = match frame_type {
+                    network::protocol::FrameType::KeyFrame => "keyframe",
+                    network::protocol::FrameType::DeltaFrame => "delta",
+                };
+
+                if session_active {
+                    // For now, emit the raw H264 data encoded as base64
+                    // The frontend will need to decode this
+                    use base64::{Engine, engine::general_purpose::STANDARD};
+                    let _ = handle.emit("screen-frame", ScreenFrameEvent {
+                        peer_ip: remote_ip,
+                        timestamp: *timestamp,
+                        frame_type: frame_type_str.to_string(),
+                        sequence: *sequence,
+                        data: STANDARD.encode(data),
+                    });
+                }
+            }
+        }
+
+        Message::ScreenStop => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            log::info!("Received screen stop from {}", remote_ip);
+
+            // Stop viewer session
+            let sessions = streaming::get_viewer_sessions();
+            if let Some(session) = sessions.write().get_mut(&remote_ip) {
+                session.handle_screen_stop();
+            }
+
+            // Emit event to frontend
+            if let Some(handle) = APP_HANDLE.get() {
+                #[derive(serde::Serialize, Clone)]
+                struct ScreenStopEvent {
+                    peer_ip: String,
+                }
+                let _ = handle.emit("screen-stop", ScreenStopEvent {
+                    peer_ip: remote_ip,
+                });
+            }
         }
 
         // Remote control messages will be handled in Phase 6

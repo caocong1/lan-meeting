@@ -592,6 +592,80 @@ struct AdaptiveBitrate {
 - [x] Tauri 事件系统 (chat-message, file-offer, file-progress, file-complete)
 - [x] 全局 APP_HANDLE 用于事件发送
 
+### Phase 11: UI 重构 - 会议室模式 ✅
+- [x] 重新设计 UI 为单一"会议室"概念
+- [x] 服务开关 (默认关闭，用户手动开启)
+- [x] 服务关闭时显示简洁的开关界面
+- [x] 服务开启后显示会议室成员列表
+- [x] 成员卡片显示：名称、IP、共享状态
+- [x] 自己可以开始/停止共享
+- [x] 他人共享时显示"正在共享"标识，可点击观看
+- [x] 手动添加设备功能 (IP 输入)
+- [x] 设置页面 (设备名称、画质、帧率)
+
+**新增前端组件**:
+- `src/App.tsx` - 主应用，服务开关逻辑
+- `src/components/MeetingRoom/index.tsx` - 会议室组件
+- `src/components/Settings/index.tsx` - 设置弹窗
+- `src/components/AddDeviceModal/index.tsx` - 添加设备弹窗
+
+**新增后端命令**:
+- `start_service` - 启动 QUIC + mDNS 服务
+- `stop_service` - 停止服务
+- `is_service_running` - 检查服务状态
+- `get_settings` / `save_settings` - 设置管理
+- `broadcast_sharing_status` - 广播共享状态到所有对等端
+- `open_viewer_window` - 打开观看者窗口
+- `request_control` - 请求远程控制
+
+**通信改进**:
+- 双向设备发现 (A 添加 B 后，B 的列表也显示 A)
+- 共享状态同步 (ScreenOffer 消息 + sharing-status-changed 事件)
+- 连接后自动监听消息
+
+### Phase 12: 观看者窗口 ✅
+- [x] Vite 多页面配置 (`viewer.html` 入口)
+- [x] 观看者窗口组件 (`src/components/Viewer/index.tsx`)
+- [x] 窗口参数传递 (peer_id, peer_name, peer_ip)
+- [x] 连接状态显示 (连接中/已连接/已断开)
+- [x] 视频画布准备 (canvas 元素)
+- [ ] 请求视频流逻辑
+- [ ] 视频帧接收和解码
+- [ ] 视频渲染到 canvas
+
+### Phase 13: 视频流传输 ✅
+- [x] 发送端: 捕获 → 编码 → 发送 ScreenFrame 消息
+- [x] 接收端: 接收 ScreenFrame → 事件通知前端
+- [x] 视频流请求协议 (ScreenRequest → ScreenStart)
+- [x] 帧率控制 (基于配置的 FPS)
+- [x] StreamingManager 管理发送端流
+- [x] ViewerSession 管理接收端会话
+- [ ] 前端视频解码渲染 (需要 WebCodecs 或 WASM 解码器)
+- [ ] 自适应码率 (根据网络状况调整)
+- [ ] 关键帧请求机制
+
+**新增模块**:
+- `src-tauri/src/streaming/mod.rs` - 视频流管理模块
+  - `StreamingManager` - 发送端流管理 (捕获→编码→发送)
+  - `ViewerSession` - 接收端会话管理 (接收→解码)
+  - `StreamingConfig` - 流配置 (FPS、画质、显示器)
+  - `Quality` - 画质枚举 (Auto/High/Medium/Low)
+
+**新增命令**:
+- `request_screen_stream` - 请求对方的视频流
+- `stop_viewing_stream` - 停止观看视频流
+
+**流程**:
+1. A 开始共享 → 调用 `broadcast_sharing_status(true)`
+2. A 端 StreamingManager 开始捕获、编码、发送 ScreenFrame
+3. B 点击"观看" → 打开 Viewer 窗口
+4. Viewer 调用 `request_screen_stream` → 发送 ScreenRequest
+5. A 端收到请求 → 发送 ScreenStart 响应
+6. B 端收到 ScreenStart → 状态变为 "streaming"
+7. A 端持续发送 ScreenFrame → B 端通过事件接收
+8. B 端 Viewer 显示帧计数器 (实际渲染待实现)
+9. A 停止共享 → ScreenStop → B 端状态变为 "disconnected"
+
 ---
 
 ## 已实现模块说明
@@ -747,6 +821,38 @@ macOS 辅助功能权限。
 - `send_message()` / `receive_message()` - 发送/接收消息
 - `get_chat_manager()` - 获取全局聊天管理器
 
+### streaming/mod.rs
+视频流传输模块，管理屏幕共享的捕获、编码、发送和接收。
+- `StreamingManager` - 发送端管理器
+  - `start_sync()` - 开始流 (同步启动，异步执行)
+  - `stop_sync()` - 停止流
+  - `is_streaming()` - 检查是否正在流
+  - `frame_count()` - 获取已发送帧数
+- `ViewerSession` - 接收端会话
+  - `handle_screen_start()` - 处理 ScreenStart 消息
+  - `handle_screen_frame()` - 处理 ScreenFrame 消息
+  - `handle_screen_stop()` - 处理 ScreenStop 消息
+- `StreamingConfig` - 流配置 (fps, quality, display_id)
+- `Quality` - 画质枚举 (Auto=8Mbps, High=8Mbps, Medium=4Mbps, Low=2Mbps)
+- `request_screen_stream()` - 发送流请求
+- `create_viewer_session()` / `remove_viewer_session()` - 会话管理
+
+**发送流程**:
+1. 用户开始共享 → `broadcast_sharing_status(true)`
+2. 创建 StreamingManager → 初始化捕获和编码器
+3. 启动后台任务:
+   - 发送 ScreenStart 消息
+   - 循环: 捕获帧 → 编码 → 发送 ScreenFrame
+   - 帧率控制 (根据配置的 FPS)
+4. 停止时发送 ScreenStop 消息
+
+**接收流程**:
+1. Viewer 窗口打开 → `request_screen_stream()`
+2. 发送 ScreenRequest 消息
+3. 接收 ScreenStart → 初始化解码器
+4. 接收 ScreenFrame → 通过事件通知前端
+5. 接收 ScreenStop → 会话结束
+
 ### transfer/mod.rs
 文件传输模块，支持 P2P 文件共享和断点续传。
 - `FileInfo` - 文件信息结构 (ID、名称、大小、SHA-256 校验和、MIME 类型)
@@ -774,26 +880,59 @@ macOS 辅助功能权限。
 
 ### 前端组件 (src/components/)
 
-**DeviceList/index.tsx** - 设备发现和连接
+**App.tsx** - 主应用入口
+- 服务开关界面 (默认关闭)
+- 服务开启后显示 MeetingRoom
+- 设置弹窗管理
+- 调用后端: `start_service`, `stop_service`, `is_service_running`, `get_self_info`
+
+**MeetingRoom/index.tsx** - 会议室主界面
+- 成员列表显示 (自己 + 其他设备)
+- 开始/停止共享按钮
+- 观看他人共享屏幕
+- 请求远程控制
+- 添加设备弹窗
+- 事件监听: `device-discovered`, `device-removed`, `sharing-status-changed`
+- 调用后端: `get_devices`, `broadcast_sharing_status`, `open_viewer_window`, `request_control`
+
+**Settings/index.tsx** - 设置弹窗
+- 设备名称设置
+- 画质选择 (自动/高/中/低)
+- 帧率选择 (15/30/60 FPS)
+- 调用后端: `get_settings`, `save_settings`
+
+**AddDeviceModal/index.tsx** - 手动添加设备
+- IP 地址输入
+- 连接验证
+- 调用后端: `add_manual_device`
+
+**Viewer/index.tsx** - 视频观看窗口
+- URL 参数解析 (peer_id, peer_name, peer_ip)
+- 连接状态显示
+- 视频 canvas 渲染
+- 全屏/请求控制按钮
+- 调用后端: `request_control` (待实现)
+
+**DeviceList/index.tsx** - 设备发现和连接 (旧版)
 - 设备列表显示 (状态指示器: 在线/忙碌/离线)
 - 手动 IP 连接
 - 事件监听 (device-discovered/device-removed)
 - 调用后端: `get_devices`, `add_manual_device`, `connect_to_device`
 
-**ScreenShare/index.tsx** - 屏幕共享控制
+**ScreenShare/index.tsx** - 屏幕共享控制 (旧版)
 - 显示器选择 (从后端获取)
 - 权限检查和请求 (macOS)
 - 开始/停止共享
 - 设置 (帧率/画质/远程控制)
 - 调用后端: `check_screen_permission`, `request_screen_permission`, `get_displays`, `start_capture`, `stop_capture`
 
-**Chat/index.tsx** - 实时聊天
+**Chat/index.tsx** - 实时聊天 (旧版)
 - 消息列表 (本地/远程消息区分)
 - 文本输入和发送
 - 自动滚动到最新消息
 - 调用后端: `get_chat_messages`, `send_chat_message`
 
-**FileTransfer/index.tsx** - 文件传输
+**FileTransfer/index.tsx** - 文件传输 (旧版)
 - 文件选择 (Tauri Dialog 插件)
 - 传输列表 (进行中/已完成)
 - 进度条显示
