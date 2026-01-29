@@ -247,18 +247,53 @@ pub fn update_device_status(id: &str, status: DeviceStatus) {
 }
 
 /// Manually add a device by IP address
+/// This will attempt to connect to verify the device is reachable
 pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice, NetworkError> {
-    let device = DiscoveredDevice {
-        id: format!("manual-{}", ip.replace('.', "-")),
-        name: format!("Device at {}", ip),
-        ip,
-        port,
-        status: DeviceStatus::Online,
-        last_seen: now_ms(),
-    };
+    use std::net::SocketAddr;
+    use std::time::Duration;
 
-    add_device(device.clone());
-    Ok(device)
+    let addr: SocketAddr = format!("{}:{}", ip, port)
+        .parse()
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Invalid address: {}", e)))?;
+
+    // Try to connect with a timeout to verify the device is reachable
+    let endpoint = crate::get_quic_endpoint()
+        .ok_or_else(|| NetworkError::ConnectionFailed("QUIC endpoint not initialized".to_string()))?;
+
+    // Attempt connection with timeout
+    let connect_future = endpoint.connect(addr);
+    let timeout_duration = Duration::from_secs(5);
+
+    match tokio::time::timeout(timeout_duration, connect_future).await {
+        Ok(Ok(_conn)) => {
+            // Connection successful, add device as online
+            let device = DiscoveredDevice {
+                id: format!("manual-{}", ip.replace('.', "-")),
+                name: format!("Device at {}", ip),
+                ip,
+                port,
+                status: DeviceStatus::Online,
+                last_seen: now_ms(),
+            };
+
+            add_device(device.clone());
+            log::info!("Manual device added and verified: {}", device.ip);
+            Ok(device)
+        }
+        Ok(Err(e)) => {
+            log::warn!("Failed to connect to manual device {}: {}", ip, e);
+            Err(NetworkError::ConnectionFailed(format!(
+                "Connection failed: {}",
+                e
+            )))
+        }
+        Err(_) => {
+            log::warn!("Connection timeout to manual device {}", ip);
+            Err(NetworkError::ConnectionFailed(
+                "Connection timeout - device may not be running LAN Meeting".to_string(),
+            ))
+        }
+    }
 }
 
 /// Shutdown mDNS service
