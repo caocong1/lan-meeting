@@ -100,10 +100,13 @@ impl QuicEndpoint {
     fn create_client_config() -> Result<ClientConfig, NetworkError> {
         // For LAN use, we skip certificate verification
         // In production, you'd want proper certificate validation
-        let crypto = rustls::ClientConfig::builder()
+        let mut crypto = rustls::ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(SkipServerVerification))
             .with_no_client_auth();
+
+        // IMPORTANT: Must match server's ALPN protocols
+        crypto.alpn_protocols = vec![b"lan-meeting".to_vec()];
 
         let mut client_config = ClientConfig::new(Arc::new(
             quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
