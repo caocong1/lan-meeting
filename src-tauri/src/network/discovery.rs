@@ -372,6 +372,13 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
 
     add_device(device.clone());
     log::info!("Manual device added and verified: {} ({})", device.name, device.ip);
+
+    // Start listening for incoming messages on this connection
+    // This is important so we can receive sharing status updates from the peer
+    let conn_clone = conn.clone();
+    tokio::spawn(async move {
+        crate::handle_incoming_connection(conn_clone).await;
+    });
     Ok(device)
 }
 
