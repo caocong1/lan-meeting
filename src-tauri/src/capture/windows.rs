@@ -8,6 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::{
     core::Interface,
+    Win32::Foundation::HMODULE,
     Win32::Graphics::Direct3D::*,
     Win32::Graphics::Direct3D11::*,
     Win32::Graphics::Dxgi::Common::*,
@@ -60,9 +61,8 @@ impl WindowsCapture {
                 // Enumerate outputs for this adapter
                 let mut output_idx = 0u32;
                 while let Ok(output) = adapter.EnumOutputs(output_idx) {
-                    let mut desc = DXGI_OUTPUT_DESC::default();
-                    output
-                        .GetDesc(&mut desc)
+                    let desc = output
+                        .GetDesc()
                         .map_err(|e| CaptureError::InitError(format!("GetDesc failed: {}", e)))?;
 
                     let rect = desc.DesktopCoordinates;
@@ -134,7 +134,7 @@ impl WindowsCapture {
             D3D11CreateDevice(
                 &adapter,
                 D3D_DRIVER_TYPE_UNKNOWN,
-                None,
+                HMODULE(std::ptr::null_mut()),
                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                 Some(&[D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1]),
                 D3D11_SDK_VERSION,
@@ -157,8 +157,7 @@ impl WindowsCapture {
             })?;
 
             // Get output description
-            let mut output_desc = DXGI_OUTPUT_DESC::default();
-            output.GetDesc(&mut output_desc).map_err(|e| {
+            let output_desc = output.GetDesc().map_err(|e| {
                 CaptureError::InitError(format!("GetDesc failed: {}", e))
             })?;
 
@@ -194,9 +193,9 @@ impl WindowsCapture {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_STAGING,
-                BindFlags: D3D11_BIND_FLAG(0),
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ,
-                MiscFlags: D3D11_RESOURCE_MISC_FLAG(0),
+                BindFlags: D3D11_BIND_FLAG(0).0 as u32,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
             };
 
             let mut staging_texture: Option<ID3D11Texture2D> = None;

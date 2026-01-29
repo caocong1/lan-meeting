@@ -29,6 +29,9 @@ pub fn get_quic_endpoint() -> Option<&'static Arc<QuicEndpoint>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Install aws-lc-rs as the default crypto provider for rustls
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     tauri::Builder::default()
         .setup(|app| {
             // Initialize logging

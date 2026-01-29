@@ -14,6 +14,7 @@
         "@iconify-json/lucide": "^1.2.87",
         "@tauri-apps/api": "^2.9.1",
         "@tauri-apps/cli": "^2.9.6",
+        "@tauri-apps/cli-win32-arm64-msvc": "^2.9.6",
         "@types/bun": "latest",
         "@unocss/preset-icons": "^66.6.0",
         "@unocss/preset-uno": "^66.6.0",
