@@ -5,7 +5,13 @@ export default defineConfig({
     presetUno(),
     presetIcons({
       scale: 1.2,
-      cdn: "https://esm.sh/",
+      extraProperties: {
+        'display': 'inline-block',
+        'vertical-align': 'middle',
+      },
+      collections: {
+        lucide: () => import('@iconify-json/lucide/icons.json').then(i => i.default),
+      },
     }),
   ],
   theme: {
