@@ -11,7 +11,7 @@ pub mod network;
 pub mod renderer;
 pub mod transfer;
 
-use network::quic::{QuicConfig, QuicEndpoint};
+use network::quic::QuicEndpoint;
 use once_cell::sync::OnceCell;
 use std::sync::Arc;
 use tauri::Emitter;
@@ -49,40 +49,8 @@ pub fn run() {
             // Store app handle globally for emitting events
             let _ = APP_HANDLE.set(app.handle().clone());
 
-            // Initialize network discovery
-            let handle = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = network::discovery::start_discovery(handle).await {
-                    log::error!("Failed to start mDNS discovery: {}", e);
-                }
-            });
-
-            // Initialize QUIC endpoint
-            tauri::async_runtime::spawn(async move {
-                match QuicEndpoint::new(QuicConfig::default()).await {
-                    Ok(endpoint) => {
-                        let endpoint = Arc::new(endpoint);
-                        log::info!("QUIC endpoint initialized on {}", endpoint.local_addr());
-
-                        // Store globally
-                        let _ = QUIC_ENDPOINT.set(endpoint.clone());
-
-                        // Start accepting connections
-                        endpoint.start_server(|conn| {
-                            log::info!("Incoming connection from {}", conn.remote_addr());
-                            // Handle incoming connection in a separate task
-                            tokio::spawn(async move {
-                                handle_incoming_connection(conn).await;
-                            });
-                        });
-                    }
-                    Err(e) => {
-                        log::error!("Failed to initialize QUIC endpoint: {}", e);
-                    }
-                }
-            });
-
-            log::info!("LAN Meeting started");
+            // Note: QUIC and mDNS are now started via start_service command
+            log::info!("LAN Meeting started (service not yet enabled)");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -125,7 +93,7 @@ pub fn run() {
 }
 
 /// Handle incoming QUIC connection
-async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>) {
+pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>) {
     use network::protocol::MessageCodec;
 
     log::info!("Handling connection from {}", conn.remote_addr());

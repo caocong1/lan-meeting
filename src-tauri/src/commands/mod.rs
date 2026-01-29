@@ -499,17 +499,55 @@ pub fn get_download_directory() -> String {
 
 // ===== Service commands =====
 
+use crate::network::quic::{QuicConfig, QuicEndpoint};
+use std::sync::Arc;
+
 /// Service state
 static SERVICE_RUNNING: once_cell::sync::Lazy<parking_lot::RwLock<bool>> =
     once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(false));
 
 /// Start the network service (mDNS discovery + QUIC server)
 #[tauri::command]
-pub async fn start_service() -> Result<(), String> {
+pub async fn start_service(app_handle: tauri::AppHandle) -> Result<(), String> {
+    if *SERVICE_RUNNING.read() {
+        return Ok(()); // Already running
+    }
+
     log::info!("Starting network service");
 
-    // Service is already started in lib.rs setup, just mark as running
+    // Start mDNS discovery
+    let handle = app_handle.clone();
+    tokio::spawn(async move {
+        if let Err(e) = discovery::start_discovery(handle).await {
+            log::error!("Failed to start mDNS discovery: {}", e);
+        }
+    });
+
+    // Start QUIC endpoint
+    match QuicEndpoint::new(QuicConfig::default()).await {
+        Ok(endpoint) => {
+            let endpoint = Arc::new(endpoint);
+            log::info!("QUIC endpoint initialized on {}", endpoint.local_addr());
+
+            // Store globally
+            let _ = crate::QUIC_ENDPOINT.set(endpoint.clone());
+
+            // Start accepting connections
+            endpoint.start_server(|conn| {
+                log::info!("Incoming connection from {}", conn.remote_addr());
+                tokio::spawn(async move {
+                    crate::handle_incoming_connection(conn).await;
+                });
+            });
+        }
+        Err(e) => {
+            log::error!("Failed to initialize QUIC endpoint: {}", e);
+            return Err(format!("Failed to start QUIC: {}", e));
+        }
+    }
+
     *SERVICE_RUNNING.write() = true;
+    log::info!("Network service started");
 
     Ok(())
 }
