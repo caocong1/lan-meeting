@@ -87,13 +87,24 @@ impl QuicEndpoint {
                 .map_err(|e| NetworkError::ConnectionFailed(format!("QUIC config error: {}", e)))?,
         ));
 
-        // Configure transport for low latency
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
-        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        // Configure transport for low latency video streaming
+        let transport = Self::create_transport_config();
         server_config.transport_config(Arc::new(transport));
 
         Ok((server_config, cert_der))
+    }
+
+    /// Create shared transport configuration for both server and client
+    fn create_transport_config() -> quinn::TransportConfig {
+        let mut transport = quinn::TransportConfig::default();
+        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
+        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        // Allow more concurrent streams for video frame broadcasting
+        transport.max_concurrent_bidi_streams(1024u32.into());
+        transport.max_concurrent_uni_streams(1024u32.into());
+        // Enable datagrams for future low-latency frame delivery
+        transport.datagram_receive_buffer_size(Some(65536));
+        transport
     }
 
     /// Create client configuration (accepts any certificate for LAN use)
@@ -113,10 +124,8 @@ impl QuicEndpoint {
                 .map_err(|e| NetworkError::ConnectionFailed(format!("Client config error: {}", e)))?,
         ));
 
-        // Configure transport for low latency
-        let mut transport = quinn::TransportConfig::default();
-        transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
-        transport.keep_alive_interval(Some(Duration::from_secs(5)));
+        // Configure transport for low latency video streaming
+        let transport = Self::create_transport_config();
         client_config.transport_config(Arc::new(transport));
 
         Ok(client_config)
@@ -290,9 +299,16 @@ impl QuicConnection {
         self.connection.close(0u32.into(), b"done");
     }
 
-    /// Check if connection is alive
+    /// Check if the underlying QUIC connection is still alive
+    /// Unlike is_connected() which only tracks explicit close(), this checks
+    /// the actual connection state including natural timeouts
+    pub fn is_alive(&self) -> bool {
+        self.connection.close_reason().is_none()
+    }
+
+    /// Check if connection is alive (legacy - prefer is_alive())
     pub fn is_connected(&self) -> bool {
-        *self.state.read() == ConnectionState::Connected
+        self.is_alive()
     }
 }
 
@@ -380,6 +396,9 @@ pub fn get_all_connections() -> Vec<Arc<QuicConnection>> {
 
 /// Broadcast a message to all connected peers
 pub async fn broadcast_message(data: &[u8]) -> Vec<Result<(), super::NetworkError>> {
+    // Remove dead connections first
+    cleanup_dead_connections();
+
     let connections = get_all_connections();
     let mut results = Vec::with_capacity(connections.len());
 
@@ -387,6 +406,7 @@ pub async fn broadcast_message(data: &[u8]) -> Vec<Result<(), super::NetworkErro
         let result = async {
             let mut stream = conn.open_bi_stream().await?;
             stream.send_framed(data).await?;
+            stream.finish().await?;
             Ok(())
         }
         .await;
@@ -399,24 +419,64 @@ pub async fn broadcast_message(data: &[u8]) -> Vec<Result<(), super::NetworkErro
 /// Send a message to a specific peer by connection ID or IP address
 /// Accepts either "ip:port" or just "ip" - if only IP is provided, searches for matching connection
 pub async fn send_to_peer(peer_id: &str, data: &[u8]) -> Result<(), super::NetworkError> {
-    // Try exact match first (ip:port format)
-    let conn = if let Some(conn) = get_connection(peer_id) {
-        conn
-    } else {
-        // If no exact match, try to find by IP prefix (when only IP is provided without port)
-        let connections = CONNECTIONS.read();
-        connections
-            .iter()
-            .find(|(key, _)| key.starts_with(&format!("{}:", peer_id)))
-            .map(|(_, conn)| conn.clone())
-            .ok_or_else(|| {
-                super::NetworkError::ConnectionFailed(format!("Peer not found: {}", peer_id))
-            })?
-    };
+    let conn = find_connection(peer_id).ok_or_else(|| {
+        super::NetworkError::ConnectionFailed(format!("Peer not found: {}", peer_id))
+    })?;
+
+    // Check if the connection is still alive
+    if !conn.is_alive() {
+        log::warn!("Connection to {} is dead, removing", peer_id);
+        remove_connection_by_ip(peer_id);
+        return Err(super::NetworkError::ConnectionFailed(format!(
+            "Connection to {} has timed out",
+            peer_id
+        )));
+    }
 
     let mut stream = conn.open_bi_stream().await?;
     stream.send_framed(data).await?;
+    stream.finish().await?;
     Ok(())
+}
+
+/// Find a connection by ID (exact match) or by IP prefix
+pub fn find_connection(peer_id: &str) -> Option<Arc<QuicConnection>> {
+    // Try exact match first (ip:port format)
+    if let Some(conn) = get_connection(peer_id) {
+        return Some(conn);
+    }
+    // If no exact match, try to find by IP prefix (when only IP is provided without port)
+    let connections = CONNECTIONS.read();
+    connections
+        .iter()
+        .find(|(key, _)| key.starts_with(&format!("{}:", peer_id)))
+        .map(|(_, conn)| conn.clone())
+}
+
+/// Remove dead connections from the registry
+pub fn cleanup_dead_connections() {
+    let dead_keys: Vec<String> = {
+        let connections = CONNECTIONS.read();
+        connections
+            .iter()
+            .filter(|(_, conn)| !conn.is_alive())
+            .map(|(key, _)| key.clone())
+            .collect()
+    };
+
+    if !dead_keys.is_empty() {
+        let mut connections = CONNECTIONS.write();
+        for key in &dead_keys {
+            log::info!("Removing dead connection: {}", key);
+            connections.remove(key);
+        }
+    }
+}
+
+/// Remove connection by IP address (matches ip:port keys)
+pub fn remove_connection_by_ip(ip: &str) {
+    let mut connections = CONNECTIONS.write();
+    connections.retain(|key, _| !key.starts_with(&format!("{}:", ip)) && key != ip);
 }
 
 /// Skip server certificate verification for LAN use

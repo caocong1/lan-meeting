@@ -716,6 +716,9 @@ pub async fn request_screen_stream(peer_ip: String, peer_name: String) -> Result
 
     log::info!("Requesting screen stream from {} ({})", peer_name, peer_ip);
 
+    // Ensure we have an active QUIC connection to this peer
+    ensure_peer_connection(&peer_ip).await?;
+
     // Create viewer session (native window will be created on ScreenStart)
     streaming::create_viewer_session(peer_ip.clone(), peer_name)
         .map_err(|e| format!("Failed to create viewer session: {}", e))?;
@@ -724,6 +727,99 @@ pub async fn request_screen_stream(peer_ip: String, peer_name: String) -> Result
     streaming::request_screen_stream(&peer_ip, 0)
         .await
         .map_err(|e| format!("Failed to request stream: {}", e))?;
+
+    Ok(())
+}
+
+/// Ensure there is an active QUIC connection to the peer, reconnecting if needed
+async fn ensure_peer_connection(peer_ip: &str) -> Result<(), String> {
+    use crate::network::discovery;
+
+    // Check if we already have a live connection
+    if let Some(conn) = quic::find_connection(peer_ip) {
+        if conn.is_alive() {
+            log::debug!("Existing connection to {} is alive", peer_ip);
+            return Ok(());
+        }
+        log::warn!("Connection to {} is dead, will reconnect", peer_ip);
+        quic::remove_connection_by_ip(peer_ip);
+    }
+
+    log::info!("No active connection to {}, establishing...", peer_ip);
+
+    // Find the device to get port info
+    let port = discovery::get_devices()
+        .into_iter()
+        .find(|d| d.ip == peer_ip)
+        .map(|d| d.port)
+        .unwrap_or(quic::DEFAULT_PORT);
+
+    let addr: SocketAddr = format!("{}:{}", peer_ip, port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+
+    // Get QUIC endpoint
+    let endpoint = crate::get_quic_endpoint()
+        .ok_or_else(|| "QUIC endpoint not initialized - start service first".to_string())?;
+
+    // Connect with timeout
+    let conn = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        endpoint.connect(addr),
+    )
+    .await
+    .map_err(|_| format!("Connection to {} timed out", peer_ip))?
+    .map_err(|e| format!("Failed to connect to {}: {}", peer_ip, e))?;
+
+    log::info!("Connected to {} at {}", peer_ip, conn.remote_addr());
+
+    // Send handshake
+    let our_id = discovery::get_our_device_id();
+    let our_name = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let handshake = crate::network::protocol::create_handshake(&our_id, &our_name);
+    let encoded = crate::network::protocol::encode(&handshake)
+        .map_err(|e| format!("Failed to encode handshake: {}", e))?;
+
+    let mut stream = conn
+        .open_bi_stream()
+        .await
+        .map_err(|e| format!("Failed to open handshake stream: {}", e))?;
+
+    stream
+        .send_framed(&encoded)
+        .await
+        .map_err(|e| format!("Failed to send handshake: {}", e))?;
+
+    // Wait for handshake ack
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.recv_framed(),
+    )
+    .await
+    .map_err(|_| "Handshake ack timed out".to_string())?
+    .map_err(|e| format!("Failed to receive handshake ack: {}", e))?;
+
+    let ack = crate::network::protocol::decode(&response)
+        .map_err(|e| format!("Failed to decode handshake ack: {}", e))?;
+
+    match ack {
+        crate::network::protocol::Message::HandshakeAck { accepted, reason, name, .. } => {
+            if !accepted {
+                return Err(format!("Connection rejected: {}", reason.unwrap_or_default()));
+            }
+            log::info!("Reconnected and handshake accepted by {}", name);
+        }
+        _ => return Err("Unexpected handshake response".to_string()),
+    }
+
+    // Start listening for incoming messages on this connection
+    let conn_clone = conn.clone();
+    tokio::spawn(async move {
+        crate::handle_incoming_connection(conn_clone).await;
+    });
 
     Ok(())
 }
