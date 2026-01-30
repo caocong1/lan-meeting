@@ -2907,6 +2907,7 @@ dependencies = [
  "pipewire",
  "pollster",
  "quinn",
+ "raw-window-handle",
  "rcgen",
  "rustls",
  "serde",

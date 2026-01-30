@@ -138,6 +138,244 @@ impl WgpuRenderer {
         Self::new_internal(Some(window)).await
     }
 
+    /// Create a new renderer with a pre-created raw surface (for macOS native windows)
+    pub async fn new_with_raw_surface(
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RendererError> {
+        Self::new_internal_raw(surface, width, height).await
+    }
+
+    async fn new_internal_raw(
+        surface: wgpu::Surface<'static>,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, RendererError> {
+        // Request adapter
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|e| RendererError::GpuNotAvailable(format!("Failed to request adapter: {}", e)))?;
+
+        log::info!("Using GPU adapter: {:?}", adapter.get_info().name);
+
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor::default())
+            .await
+            .map_err(|e| RendererError::InitError(format!("Failed to create device: {}", e)))?;
+
+        // Configure surface
+        let capabilities = surface.get_capabilities(&adapter);
+        let format = capabilities
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(capabilities.formats[0]);
+
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: width.max(1),
+            height: height.max(1),
+            present_mode: wgpu::PresentMode::Mailbox,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+        surface.configure(&device, &config);
+
+        // Create sampler, pipelines (same as new_internal)
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Frame Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let bgra_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("BGRA Shader"),
+            source: wgpu::ShaderSource::Wgsl(BGRA_SHADER.into()),
+        });
+
+        let bgra_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("BGRA Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let bgra_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("BGRA Pipeline Layout"),
+                bind_group_layouts: &[&bgra_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let bgra_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("BGRA Pipeline"),
+            layout: Some(&bgra_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &bgra_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &bgra_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let yuv_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("YUV Shader"),
+            source: wgpu::ShaderSource::Wgsl(YUV_SHADER.into()),
+        });
+
+        let yuv_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("YUV Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        let yuv_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("YUV Pipeline Layout"),
+                bind_group_layouts: &[&yuv_bind_group_layout],
+                immediate_size: 0,
+            });
+
+        let yuv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("YUV Pipeline"),
+            layout: Some(&yuv_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &yuv_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &yuv_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        log::info!("wgpu renderer initialized (raw surface)");
+
+        Ok(Self {
+            device,
+            queue,
+            surface: Some(surface),
+            surface_config: Some(config),
+            bgra_pipeline,
+            bgra_bind_group_layout,
+            bgra_texture: None,
+            bgra_bind_group: None,
+            yuv_pipeline,
+            yuv_bind_group_layout,
+            yuv_textures: None,
+            yuv_bind_group: None,
+            sampler,
+            frame_width: 0,
+            frame_height: 0,
+        })
+    }
+
     async fn new_internal(
         window: Option<Arc<winit::window::Window>>,
     ) -> Result<Self, RendererError> {

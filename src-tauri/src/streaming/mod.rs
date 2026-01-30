@@ -355,6 +355,7 @@ impl ViewerSession {
         self.height = height;
 
         // Initialize decoder with BGRA output for direct GPU upload
+        log::debug!("Initializing decoder for {}x{} BGRA output", width, height);
         let config = DecoderConfig {
             width,
             height,
@@ -363,12 +364,20 @@ impl ViewerSession {
 
         self.decoder
             .init(config)
-            .map_err(|e| StreamingError::DecoderError(e.to_string()))?;
+            .map_err(|e| {
+                log::error!("Decoder init failed: {}", e);
+                StreamingError::DecoderError(e.to_string())
+            })?;
+        log::debug!("Decoder initialized successfully");
 
         // Create native render window
         let title = format!("{} 的屏幕 ({})", self.peer_name, self.peer_ip);
+        log::debug!("Creating native render window: '{}' ({}x{})", title, width, height);
         let window_handle = RenderWindow::create(&title, width, height)
-            .map_err(|e| StreamingError::DecoderError(format!("Failed to create window: {}", e)))?;
+            .map_err(|e| {
+                log::error!("RenderWindow::create failed: {}", e);
+                StreamingError::DecoderError(format!("Failed to create window: {}", e))
+            })?;
 
         self.window_handle = Some(window_handle);
         self.is_active = true;
