@@ -5,6 +5,11 @@
 # Uncomment for release builds optimization
 # rustflags = ["-C", "target-cpu=native"]
 
+# Windows x64 cross-compilation: allow pkg-config to find GStreamer and FFmpeg
+# These are picked up automatically by cargo, no shell env vars needed
+[env]
+PKG_CONFIG_ALLOW_CROSS = "1"
+
 [target.x86_64-apple-darwin]
 rustflags = ["-C", "link-arg=-Wl,-rpath,@executable_path/../Frameworks"]
 

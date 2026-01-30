@@ -56,7 +56,11 @@ lz4_flex = "0.11"          # Fast compression for raw frames
 
 # Hardware-accelerated video codecs
 ffmpeg-next = "8.0"        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
-vk-video = "0.1"           # Vulkan Video decoding with wgpu integration (zero-copy)
+
+# GStreamer hardware video decoding (cross-platform, Vulkan/D3D11/VideoToolbox/VAAPI)
+gstreamer = "0.24"
+gstreamer-video = "0.24"
+gstreamer-app = "0.24"
 
 # Utilities
 thiserror = "2"
@@ -109,6 +113,7 @@ x11rb = { version = "0.13", optional = true }
 
 [features]
 default = []
+# Linux-specific features
 pipewire = ["dep:pipewire"]
 wayland = ["dep:wayland-client"]
 x11 = ["dep:x11rb"]

@@ -10,6 +10,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:win": "cmd /c dev-win.cmd",
     "tauri:build": "tauri build",
     "check": "tsc --noEmit"
   },

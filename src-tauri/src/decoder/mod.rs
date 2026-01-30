@@ -2,12 +2,12 @@
 // Hardware decoding with software fallback
 //
 // Decoder priority:
-// 1. Vulkan Video (cross-platform hardware acceleration via vk-video)
+// 1. GStreamer (cross-platform, auto-selects best hardware decoder)
 // 2. Platform-specific hardware (VideoToolbox/DXVA/VAAPI)
 // 3. OpenH264 software decoder
 
+pub mod gstreamer;
 pub mod software;
-pub mod vulkan;
 
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
@@ -67,8 +67,7 @@ pub enum DecodedFrameData {
         strides: Option<[usize; 3]>,
     },
     /// Frame decoded directly to GPU texture (zero-copy path)
-    /// Note: Requires vk-video to update to wgpu 28 for full support
-    /// For now, this variant is reserved for future use
+    /// Used when GStreamer Vulkan pipeline shares memory with wgpu
     #[allow(dead_code)]
     Gpu {
         /// Placeholder for future wgpu::Texture integration
@@ -157,16 +156,16 @@ pub trait VideoDecoder: Send + Sync {
 
 /// Create the best available decoder for this platform
 pub fn create_decoder() -> Result<Box<dyn VideoDecoder>, DecoderError> {
-    // Try Vulkan Video hardware decoder first (cross-platform)
-    match vulkan::VulkanDecoder::new() {
+    // Try GStreamer first (cross-platform, auto-selects best hardware decoder)
+    match gstreamer::GStreamerDecoder::new() {
         Ok(dec) => {
-            log::info!("Using Vulkan Video hardware decoder");
+            log::info!("Using GStreamer decoder (auto hardware selection)");
             return Ok(Box::new(dec));
         }
-        Err(e) => log::warn!("Vulkan Video decoder not available: {}", e),
+        Err(e) => log::warn!("GStreamer decoder not available: {}", e),
     }
 
-    // Try platform-specific hardware decoders
+    // Try platform-specific hardware decoders as fallback
     #[cfg(target_os = "macos")]
     {
         match videotoolbox::VideoToolboxDecoder::new() {

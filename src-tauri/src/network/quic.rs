@@ -396,10 +396,23 @@ pub async fn broadcast_message(data: &[u8]) -> Vec<Result<(), super::NetworkErro
     results
 }
 
-/// Send a message to a specific peer by connection ID
+/// Send a message to a specific peer by connection ID or IP address
+/// Accepts either "ip:port" or just "ip" - if only IP is provided, searches for matching connection
 pub async fn send_to_peer(peer_id: &str, data: &[u8]) -> Result<(), super::NetworkError> {
-    let conn = get_connection(peer_id)
-        .ok_or_else(|| super::NetworkError::ConnectionFailed(format!("Peer not found: {}", peer_id)))?;
+    // Try exact match first (ip:port format)
+    let conn = if let Some(conn) = get_connection(peer_id) {
+        conn
+    } else {
+        // If no exact match, try to find by IP prefix (when only IP is provided without port)
+        let connections = CONNECTIONS.read();
+        connections
+            .iter()
+            .find(|(key, _)| key.starts_with(&format!("{}:", peer_id)))
+            .map(|(_, conn)| conn.clone())
+            .ok_or_else(|| {
+                super::NetworkError::ConnectionFailed(format!("Peer not found: {}", peer_id))
+            })?
+    };
 
     let mut stream = conn.open_bi_stream().await?;
     stream.send_framed(data).await?;

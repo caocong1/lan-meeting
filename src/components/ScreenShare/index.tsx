@@ -72,11 +72,12 @@ export const ScreenShare: Component = () => {
 
     try {
       setError(null);
-      await invoke("start_capture", { displayId });
+      // Use broadcast_sharing_status which handles capture internally
+      await invoke("broadcast_sharing_status", { isSharing: true, displayId });
       setIsSharing(true);
       console.log("Started sharing display:", displayId);
     } catch (e) {
-      console.error("Failed to start capture:", e);
+      console.error("Failed to start sharing:", e);
       setError(`启动屏幕共享失败: ${e}`);
     }
   };
@@ -84,11 +85,12 @@ export const ScreenShare: Component = () => {
   // Stop screen sharing
   const handleStopSharing = async () => {
     try {
-      await invoke("stop_capture");
+      // Use broadcast_sharing_status which handles capture stop internally
+      await invoke("broadcast_sharing_status", { isSharing: false, displayId: null });
       setIsSharing(false);
       console.log("Stopped sharing");
     } catch (e) {
-      console.error("Failed to stop capture:", e);
+      console.error("Failed to stop sharing:", e);
       setError(`停止屏幕共享失败: ${e}`);
     }
   };
