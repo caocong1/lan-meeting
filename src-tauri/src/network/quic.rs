@@ -189,16 +189,34 @@ impl QuicEndpoint {
 
         tokio::spawn(async move {
             loop {
-                match self.accept().await {
-                    Ok(conn) => {
+                // Wait for an incoming connection attempt
+                let incoming = match self.endpoint.accept().await {
+                    Some(incoming) => incoming,
+                    None => {
+                        log::info!("QUIC endpoint closed, stopping server");
+                        break;
+                    }
+                };
+
+                // Complete the connection handshake (may fail for individual connections)
+                match incoming.await {
+                    Ok(connection) => {
+                        let remote_addr = connection.remote_address();
+                        log::info!("Accepted connection from {}", remote_addr);
+
+                        let conn = Arc::new(QuicConnection::new(connection));
+                        let conn_id = remote_addr.to_string();
+                        CONNECTIONS.write().insert(conn_id, conn.clone());
+
                         let on_connection = on_connection.clone();
                         tokio::spawn(async move {
                             on_connection(conn);
                         });
                     }
                     Err(e) => {
-                        log::error!("Failed to accept connection: {}", e);
-                        break;
+                        // Individual connection failed - continue accepting others
+                        log::warn!("Failed to accept individual connection: {}", e);
+                        continue;
                     }
                 }
             }

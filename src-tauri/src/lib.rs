@@ -308,7 +308,9 @@ async fn handle_message(
             let is_streaming = manager.read().as_ref().map(|m| m.is_streaming()).unwrap_or(false);
 
             if is_streaming {
-                // Send ScreenStart response
+                // Send ScreenStart response via a NEW stream (not the request stream)
+                // The request stream is already finished/dropped by the sender,
+                // so we must use send_to_peer to open a fresh stream
                 let (width, height) = manager.read().as_ref().map(|m| m.dimensions()).unwrap_or((1920, 1080));
                 let fps = manager.read().as_ref().map(|m| m.config().fps).unwrap_or(30);
 
@@ -320,8 +322,14 @@ async fn handle_message(
                 };
 
                 if let Ok(encoded) = network::protocol::encode(&start_msg) {
-                    let _ = stream.send_framed(&encoded).await;
+                    if let Err(e) = network::quic::send_to_peer(&remote_ip, &encoded).await {
+                        log::error!("Failed to send ScreenStart to {}: {}", remote_ip, e);
+                    } else {
+                        log::info!("Sent ScreenStart to {} ({}x{} @ {}fps)", remote_ip, width, height, fps);
+                    }
                 }
+            } else {
+                log::warn!("Received ScreenRequest from {} but we are not streaming", remote_ip);
             }
         }
 
