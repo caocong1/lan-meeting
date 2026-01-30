@@ -433,7 +433,21 @@ pub async fn send_to_peer(peer_id: &str, data: &[u8]) -> Result<(), super::Netwo
         )));
     }
 
-    let mut stream = conn.open_bi_stream().await?;
+    // Use a timeout for stream opening to fail fast instead of waiting
+    // for the full connection idle timeout (30s)
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(3),
+        conn.open_bi_stream(),
+    )
+    .await
+    .map_err(|_| {
+        log::warn!("Timeout opening stream to {}, connection may be dead", peer_id);
+        super::NetworkError::ConnectionFailed(format!(
+            "Stream open to {} timed out - peer may be unreachable (check firewall settings)",
+            peer_id
+        ))
+    })??;
+
     stream.send_framed(data).await?;
     stream.finish().await?;
     Ok(())
