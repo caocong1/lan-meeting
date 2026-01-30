@@ -126,7 +126,7 @@
 │ │ (独立进程渲染)   │◄┼──│  ├── ffmpeg/   → NVENC/VT/VAAPI/QSV    │  │
 │ │                 │ │  │  └── software.rs → OpenH264 (回退)      │  │
 │ │ ViewerSession   │ │  └─────────────────────────────────────────┘  │
-│ │ ├─ Vulkan解码   │ │                                               │
+│ │ ├─ GStreamer解码 │ │                                               │
 │ │ └─ GPU渲染      │ │                                               │
 │ └─────────────────┘ │                                               │
 │                     │  ┌─────────────────────────────────────────┐  │
@@ -143,8 +143,9 @@
 │                     │  └─────────────────────────────────────────┘  │
 │                     │                                               │
 │                     │  ┌─────────────────────────────────────────┐  │
-│                     │  │  decoder/ (Vulkan Video 硬件) ✅         │  │
-│                     │  │  ├── vulkan/  → vk-video (Win/Linux)   │  │
+│                     │  │  decoder/ (GStreamer 硬件加速) ✅         │  │
+│                     │  │  ├── gstreamer.rs → 跨平台硬件解码       │  │
+│                     │  │  │   (d3d11/vtdec/vaapi/nvdec)          │  │
 │                     │  │  └── software.rs → OpenH264 (回退)      │  │
 │                     │  └─────────────────────────────────────────┘  │
 │                     │                                               │
@@ -165,9 +166,9 @@
 ```
 捕获           编码               传输          解码              渲染
 ─────────────────────────────────────────────────────────────────────────
-平台原生     →  FFmpeg (HW)    →  QUIC      →  Vulkan Video   →  wgpu GPU
-(CGImage/      (VideoToolbox/    (quinn)      (vk-video)        (原生窗口)
- DXGI/X11)      NVENC/VAAPI)
+平台原生     →  FFmpeg (HW)    →  QUIC      →  GStreamer (HW) →  wgpu GPU
+(CGImage/      (VideoToolbox/    (quinn)      (d3d11/vtdec/     (原生窗口)
+ DXGI/X11)      NVENC/VAAPI)                   vaapi/nvdec)
   ↓               ↓               ↓              ↓                ↓
 ~5-10ms        ~2-5ms          ~1-5ms        ~2-5ms           ~2-5ms
 ─────────────────────────────────────────────────────────────────────────
@@ -177,12 +178,15 @@
 
 **硬件加速优化**:
 - FFmpeg 硬件编码: VideoToolbox/NVENC/VAAPI/QSV
-- Vulkan Video 硬件解码 (Windows/Linux, vk-video)
-- macOS 暂时使用 OpenH264 软件解码 (Vulkan 不支持)
+- GStreamer 硬件解码 (跨平台，自动选择最佳后端):
+  - Windows: d3d11h264dec / nvh264dec
+  - macOS: vtdec_hw (VideoToolbox)
+  - Linux: vah264dec (VAAPI) / nvh264dec
+  - 回退: avdec_h264 (FFmpeg 软件解码)
 
 **软件回退链**:
 - 编码: FFmpeg HW → libx264 → OpenH264
-- 解码: Vulkan Video → OpenH264
+- 解码: GStreamer HW → GStreamer SW (avdec_h264) → OpenH264
 
 **已优化**:
 - Rust 原生渲染，无 WebView IPC 开销
@@ -292,7 +296,7 @@ struct NetworkConfig {
     → 收到 ScreenStart
     → RenderWindow::create() 创建原生窗口
     → 收到 ScreenFrame
-    → OpenH264 解码 → BGRA 数据
+    → GStreamer 硬件解码 → BGRA 数据
     → RenderWindowHandle::render_frame()
     → wgpu 纹理上传 → GPU 渲染
 ```
@@ -361,12 +365,11 @@ lan-meeting/
 │   │   │   ├── qsv.rs          # Intel
 │   │   │   └── software.rs     # x264 回退
 │   │   │
-│   │   ├── decoder/            # 视频解码 (硬件优先)
-│   │   │   ├── mod.rs
-│   │   │   ├── videotoolbox.rs
-│   │   │   ├── nvdec.rs
-│   │   │   ├── vaapi.rs
-│   │   │   └── software.rs     # 软解码回退
+│   │   ├── decoder/            # 视频解码 (GStreamer 硬件加速)
+│   │   │   ├── mod.rs          # 解码抽象层 + 自动选择
+│   │   │   ├── gstreamer.rs    # GStreamer 跨平台硬件解码 (主要)
+│   │   │   ├── software.rs     # OpenH264 软解码 (回退)
+│   │   │   └── vulkan/         # Vulkan Video (备用，未启用)
 │   │   │
 │   │   ├── renderer/           # GPU 渲染
 │   │   │   ├── mod.rs
@@ -557,14 +560,17 @@ struct AdaptiveBitrate {
 
 ### Phase 5: 视频解码 + 渲染 ✅
 - [x] OpenH264 跨平台软件解码 (`decoder/software.rs`)
-- [x] Vulkan Video 硬件解码 (`decoder/vulkan/mod.rs`, via vk-video)
+- [x] GStreamer 跨平台硬件解码 (`decoder/gstreamer.rs`)
+  - [x] Windows: d3d11h264dec / nvh264dec
+  - [x] macOS: vtdec_hw (VideoToolbox)
+  - [x] Linux: vah264dec (VAAPI) / nvh264dec
+  - [x] 回退: avdec_h264 (FFmpeg 软件解码)
 - [x] 解码器抽象接口 (`VideoDecoder` trait)
 - [x] DecodedFrame 支持 CPU 和 GPU 数据路径
 - [x] wgpu GPU 渲染器 (`renderer/wgpu_renderer.rs`)
 - [x] BGRA 和 YUV420 GPU 着色器
 - [x] 独立渲染窗口 (`renderer/window.rs`)
-- [x] 自动解码器选择 (Vulkan Video → OpenH264)
-- [ ] 零拷贝 GPU 纹理渲染 (待 vk-video 更新到 wgpu 28)
+- [x] 自动解码器选择 (GStreamer → OpenH264)
 
 ### Phase 6: 远程控制 ✅
 - [x] 输入事件结构定义 (`input/events.rs`)
@@ -683,7 +689,7 @@ struct AdaptiveBitrate {
 - `handle_screen_frame()` - 解码 H.264 → 上传 GPU → 渲染
 - `RenderWindow` - 独立 winit + wgpu 窗口
 - `RenderWindowHandle` - 跨线程窗口控制
-- 当前使用 OpenH264 软件解码 (硬件解码器待实现)
+- 当前使用 GStreamer 硬件解码 (自动选择 d3d11/vtdec/vaapi/nvdec)
 - 直接 GPU 纹理上传，无 IPC 开销
 - 比 WebCodecs 方案更高效 (无 Base64 编码、无 Tauri 事件开销)
 
@@ -698,7 +704,7 @@ struct AdaptiveBitrate {
 | P2P 连接 | QUIC 加密连接，自签名证书 |
 | 屏幕捕获 | macOS/Windows/Linux 原生 API |
 | 视频编码 | FFmpeg 硬件编码 (NVENC/VT/VAAPI/QSV) + OpenH264 回退 |
-| 视频解码 | Vulkan Video 硬件解码 (Win/Linux) + OpenH264 回退 |
+| 视频解码 | GStreamer 硬件解码 (d3d11/vtdec/vaapi/nvdec) + OpenH264 回退 |
 | 视频渲染 | wgpu 原生窗口 GPU 渲染 |
 | 视频流 | 实时传输，帧率控制 |
 | 聊天 | 文本消息广播 |
@@ -708,7 +714,6 @@ struct AdaptiveBitrate {
 ### ⏳ 待实现功能
 | 功能 | 优先级 | 说明 |
 |------|--------|------|
-| 零拷贝解码渲染 | 中 | vk-video 升级到 wgpu 28 后启用 |
 | 远程控制 | 中 | 输入模拟已实现，权限管理待做 |
 | 自适应码率 | 中 | 根据网络状况调整 |
 | 关键帧请求 | 低 | 丢帧时请求 I 帧 |
@@ -721,12 +726,7 @@ struct AdaptiveBitrate {
 | 演示者/观看者角色 | 任意成员可共享，任意成员可观看 |
 | 会议室管理 | 简化为设备列表 |
 | WebView 视频渲染 | 改为 Rust 原生 wgpu 窗口 |
-
-### ⏸️ 暂缓功能
-| 功能 | 原因 |
-|------|------|
-| macOS Vulkan 解码 | vk-video 不支持 macOS (Metal only) |
-| 零拷贝 GPU 纹理 | vk-video 使用 wgpu 24, 我们用 wgpu 28 |
+| Vulkan Video 解码 | 改用 GStreamer 跨平台硬件解码 |
 
 ---
 
@@ -836,22 +836,31 @@ OpenH264 软件编码器 (最终回退)。
 - `DecoderConfig` - 解码配置 (分辨率、输出格式等)
 - `DecodedFrameData` - 支持 CPU 和 GPU 数据路径
 - `DecodedFrame` - 解码后的帧数据
-- `create_decoder()` - 自动选择最佳解码器
+- `create_decoder()` - 自动选择最佳解码器 (GStreamer → OpenH264)
 
-### decoder/vulkan/mod.rs
-Vulkan Video 硬件解码器 (via vk-video)。
-- `VulkanDecoder` - Vulkan Video H.264 解码
-- 支持 Windows 和 Linux (NVIDIA/AMD)
-- macOS 不支持 (返回 HardwareNotAvailable)
-- NV12 → BGRA/YUV420 颜色转换
-- 当前: CPU 输出路径
-- 未来: 零拷贝 GPU 纹理 (待 vk-video 升级到 wgpu 28)
+### decoder/gstreamer.rs
+GStreamer 跨平台硬件解码器 (主要解码器)。
+- `GStreamerDecoder` - 基于 GStreamer 管线的 H.264 解码
+- 管线: `appsrc → h264parse → decodebin → videoconvert → appsink`
+- 自动选择最佳硬件后端:
+  - Windows: d3d11h264dec (D3D11) / nvh264dec (NVIDIA)
+  - macOS: vtdec_hw (VideoToolbox)
+  - Linux: vah264dec (VAAPI) / nvh264dec (NVIDIA)
+  - 回退: avdec_h264 (FFmpeg 软件解码)
+- 低延迟 live 模式，最多缓冲 2 帧
+- 支持 BGRA 和 YUV420 输出格式
+- 首帧日志记录实际使用的解码器
 
 ### decoder/software.rs
-OpenH264 软件解码器 (回退)。
+OpenH264 软件解码器 (最终回退)。
 - `SoftwareDecoder` - 跨平台 H.264 软解码
 - YUV420 → BGRA 颜色转换
 - 支持 YUV420 直出 (用于 GPU 渲染)
+
+### decoder/vulkan/ (备用，未启用)
+Vulkan Video 硬件解码器 (via vk-video)。
+- 已实现但未在 `create_decoder()` 中启用
+- 已被 GStreamer 方案替代 (更好的跨平台兼容性)
 
 ### renderer/mod.rs
 GPU 渲染抽象层。
