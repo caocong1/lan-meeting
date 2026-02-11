@@ -59,4 +59,8 @@ impl VideoEncoder for NvencEncoder {
     fn info(&self) -> &str {
         "NVENC (NVIDIA Hardware)"
     }
+
+    fn get_dimensions(&self) -> Option<(u32, u32)> {
+        self.config.as_ref().map(|c| (c.width, c.height))
+    }
 }

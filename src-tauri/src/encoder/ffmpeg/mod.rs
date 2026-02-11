@@ -428,6 +428,10 @@ impl VideoEncoder for FfmpegEncoder {
             HwEncoderType::Libx264 => "FFmpeg libx264 (Software)",
         }
     }
+
+    fn get_dimensions(&self) -> Option<(u32, u32)> {
+        self.config.as_ref().map(|c| (c.width, c.height))
+    }
 }
 
 impl Default for FfmpegEncoder {

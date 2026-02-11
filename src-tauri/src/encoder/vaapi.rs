@@ -59,4 +59,8 @@ impl VideoEncoder for VaapiEncoder {
     fn info(&self) -> &str {
         "VAAPI (Linux Hardware)"
     }
+
+    fn get_dimensions(&self) -> Option<(u32, u32)> {
+        self.config.as_ref().map(|c| (c.width, c.height))
+    }
 }

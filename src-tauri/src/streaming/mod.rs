@@ -146,11 +146,16 @@ impl StreamingManager {
             .init(encoder_config)
             .map_err(|e| StreamingError::EncoderError(e.to_string()))?;
 
+        // Get actual encoding dimensions (may be scaled for OpenH264)
+        let (encode_width, encode_height) = encoder
+            .get_dimensions()
+            .unwrap_or((self.width, self.height));
+
         log::info!(
             "Encoder initialized: {} ({}x{} @ {} fps)",
             encoder.info(),
-            self.width,
-            self.height,
+            encode_width,
+            encode_height,
             config.fps
         );
 
@@ -164,8 +169,9 @@ impl StreamingManager {
         let is_streaming = self.is_streaming.clone();
         let frame_count = self.frame_count.clone();
         let fps = config.fps;
-        let width = self.width;
-        let height = self.height;
+        // Use encoded dimensions (may be scaled for OpenH264)
+        let width = encode_width;
+        let height = encode_height;
 
         // Spawn streaming task
         tokio::spawn(async move {

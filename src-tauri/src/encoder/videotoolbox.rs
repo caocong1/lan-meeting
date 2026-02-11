@@ -63,4 +63,8 @@ impl VideoEncoder for VideoToolboxEncoder {
     fn info(&self) -> &str {
         "VideoToolbox (Hardware)"
     }
+
+    fn get_dimensions(&self) -> Option<(u32, u32)> {
+        self.config.as_ref().map(|c| (c.width, c.height))
+    }
 }

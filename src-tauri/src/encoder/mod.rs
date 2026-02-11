@@ -2,6 +2,7 @@
 // Hardware encoding with software fallback
 
 pub mod ffmpeg;
+pub mod scaler;
 pub mod software;
 
 // Legacy platform-specific stubs (kept for reference)
@@ -89,6 +90,9 @@ pub trait VideoEncoder: Send + Sync {
 
     /// Get encoder info
     fn info(&self) -> &str;
+
+    /// Get actual encoding dimensions (may differ from input if scaling is applied)
+    fn get_dimensions(&self) -> Option<(u32, u32)>;
 }
 
 /// Create the best available encoder for this platform

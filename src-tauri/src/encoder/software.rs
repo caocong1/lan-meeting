@@ -1,6 +1,7 @@
 // Software encoder using Cisco OpenH264
 // Cross-platform H.264 software encoding
 
+use super::scaler::FrameScaler;
 use super::{EncodedFrame, EncoderConfig, EncoderError, FrameType, VideoEncoder};
 use openh264::encoder::{Encoder, EncoderConfig as H264Config};
 use openh264::formats::YUVBuffer;
@@ -10,6 +11,7 @@ use parking_lot::Mutex;
 pub struct SoftwareEncoder {
     config: Option<EncoderConfig>,
     encoder: Option<Mutex<Encoder>>,
+    scaler: Option<FrameScaler>,
     force_keyframe: bool,
     frame_count: u64,
 }
@@ -19,6 +21,7 @@ impl SoftwareEncoder {
         Ok(Self {
             config: None,
             encoder: None,
+            scaler: None,
             force_keyframe: false,
             frame_count: 0,
         })
@@ -92,6 +95,13 @@ impl SoftwareEncoder {
 
 impl VideoEncoder for SoftwareEncoder {
     fn init(&mut self, config: EncoderConfig) -> Result<(), EncoderError> {
+        // Create scaler to handle oversized frames (OpenH264 max: 3840x2160)
+        let scaler = FrameScaler::new(config.width, config.height);
+
+        // Use scaled dimensions for encoder
+        let encode_width = scaler.dst_width;
+        let encode_height = scaler.dst_height;
+
         // Get the OpenH264 API from compiled source
         let api = OpenH264API::from_source();
 
@@ -106,17 +116,35 @@ impl VideoEncoder for SoftwareEncoder {
         let encoder = Encoder::with_api_config(api, h264_config)
             .map_err(|e| EncoderError::InitError(format!("Failed to create OpenH264 encoder: {}", e)))?;
 
+        // Store scaler and modified config with scaled dimensions
+        let mut scaled_config = config.clone();
+        scaled_config.width = encode_width;
+        scaled_config.height = encode_height;
+
         self.encoder = Some(Mutex::new(encoder));
-        self.config = Some(config.clone());
+        self.scaler = Some(scaler);
+        self.config = Some(scaled_config);
         self.frame_count = 0;
 
-        log::info!(
-            "OpenH264 software encoder initialized: {}x{} @ {} fps, {} bps",
-            config.width,
-            config.height,
-            config.fps,
-            config.bitrate
-        );
+        if config.width != encode_width || config.height != encode_height {
+            log::info!(
+                "OpenH264 software encoder initialized: {}x{} -> {}x{} (scaled) @ {} fps, {} bps",
+                config.width,
+                config.height,
+                encode_width,
+                encode_height,
+                config.fps,
+                config.bitrate
+            );
+        } else {
+            log::info!(
+                "OpenH264 software encoder initialized: {}x{} @ {} fps, {} bps",
+                encode_width,
+                encode_height,
+                config.fps,
+                config.bitrate
+            );
+        }
 
         Ok(())
     }
@@ -126,6 +154,11 @@ impl VideoEncoder for SoftwareEncoder {
             .config
             .as_ref()
             .ok_or_else(|| EncoderError::EncodeError("Encoder not initialized".to_string()))?;
+
+        let scaler = self
+            .scaler
+            .as_ref()
+            .ok_or_else(|| EncoderError::EncodeError("Scaler not initialized".to_string()))?;
 
         let encoder_guard = self
             .encoder
@@ -140,8 +173,11 @@ impl VideoEncoder for SoftwareEncoder {
             self.force_keyframe = false;
         }
 
-        // Convert BGRA to YUV420
-        let yuv_data = Self::bgra_to_yuv420(frame_data, config.width, config.height);
+        // Scale frame if needed (when resolution exceeds OpenH264 limits)
+        let scaled_frame = scaler.scale(frame_data);
+
+        // Convert BGRA to YUV420 using scaled dimensions
+        let yuv_data = Self::bgra_to_yuv420(&scaled_frame, config.width, config.height);
 
         // Create YUV buffer from the converted data
         let yuv_buffer = YUVBuffer::from_vec(
@@ -192,6 +228,10 @@ impl VideoEncoder for SoftwareEncoder {
 
     fn info(&self) -> &str {
         "OpenH264 (Software)"
+    }
+
+    fn get_dimensions(&self) -> Option<(u32, u32)> {
+        self.config.as_ref().map(|c| (c.width, c.height))
     }
 }
 
