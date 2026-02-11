@@ -138,25 +138,23 @@ impl WgpuRenderer {
         Self::new_internal(Some(window)).await
     }
 
-    /// Create a new renderer with a pre-created raw surface (for macOS native windows)
+    /// Create a new renderer with a pre-created raw surface (for macOS native windows).
+    /// The instance must be the same one that created the surface.
     pub async fn new_with_raw_surface(
+        instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
     ) -> Result<Self, RendererError> {
-        Self::new_internal_raw(surface, width, height).await
+        Self::new_internal_raw(instance, surface, width, height).await
     }
 
     async fn new_internal_raw(
+        instance: wgpu::Instance,
         surface: wgpu::Surface<'static>,
         width: u32,
         height: u32,
     ) -> Result<Self, RendererError> {
-        // Request adapter
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
