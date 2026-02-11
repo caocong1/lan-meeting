@@ -204,31 +204,41 @@ pub async fn handle_viewer_request(peer_ip: &str) {
         }
         last_frame_time = std::time::Instant::now();
 
-        // Capture frame
-        let frame = match state.capture.capture_frame() {
-            Ok(f) => f,
+        // Capture + encode in block_in_place to avoid blocking tokio worker
+        let capture_result = tokio::task::block_in_place(|| {
+            let frame = match state.capture.capture_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    return Err(format!("Capture: {}", e));
+                }
+            };
+
+            let timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            let encoded = match state.encoder.encode(&frame.data, timestamp) {
+                Ok(e) => e,
+                Err(e) => {
+                    return Err(format!("Encode: {}", e));
+                }
+            };
+
+            Ok((timestamp, encoded))
+        });
+
+        let (timestamp, encoded) = match capture_result {
+            Ok(r) => r,
             Err(e) => {
-                log::warn!("[SIMPLE] Capture error: {}", e);
+                if sequence < 10 || sequence % 50 == 0 {
+                    log::warn!("[SIMPLE] Frame {} error: {}", sequence, e);
+                }
                 continue;
             }
         };
 
-        // Get timestamp
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        // Encode frame
-        let encoded = match state.encoder.encode(&frame.data, timestamp) {
-            Ok(e) => e,
-            Err(e) => {
-                log::warn!("[SIMPLE] Encode error: {}", e);
-                continue;
-            }
-        };
-
-        if sequence == 0 || sequence % 50 == 0 {
+        if sequence < 10 || sequence % 50 == 0 {
             log::info!("[SIMPLE] Frame {} encoded: {} bytes, type={:?}",
                 sequence, encoded.data.len(), encoded.frame_type);
         }
@@ -238,6 +248,10 @@ pub async fn handle_viewer_request(peer_ip: &str) {
         if let Err(e) = stream.send_framed(&frame_data).await {
             log::error!("[SIMPLE] Failed to send frame {}: {}", sequence, e);
             break;
+        }
+
+        if sequence < 10 {
+            log::info!("[SIMPLE] Frame {} sent ({} bytes on wire)", sequence, frame_data.len());
         }
 
         sequence += 1;

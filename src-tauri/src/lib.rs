@@ -622,6 +622,7 @@ async fn handle_simple_stream_with_first(
     process_simple_message(first_data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
 
     // Continue reading from stream
+    log::info!("[SIMPLE] Entering frame receive loop from {}", peer_ip);
     loop {
         let data = match stream.recv_framed().await {
             Ok(d) => d,
@@ -632,10 +633,16 @@ async fn handle_simple_stream_with_first(
         };
 
         if data.is_empty() {
+            log::warn!("[SIMPLE] Empty data received from {}", peer_ip);
             continue;
         }
 
         let msg_type = data[0];
+        if frame_count < 10 || frame_count % 50 == 0 {
+            log::info!("[SIMPLE] Received msg type=0x{:02x}, {} bytes from {} (frame_count={})",
+                msg_type, data.len(), peer_ip, frame_count);
+        }
+
         if msg_type == 0x03 {
             // MSG_TYPE_STOP
             log::info!("[SIMPLE] Received Stop message from {}", peer_ip);

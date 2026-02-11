@@ -272,17 +272,18 @@ impl RenderWindow {
             log::debug!("macOS render thread started");
 
             // Initialize wgpu renderer with instance + surface created on main thread
+            log::info!("macOS render thread: initializing wgpu renderer...");
             let renderer = pollster::block_on(async {
                 WgpuRenderer::new_with_raw_surface(instance, surface, width, height).await
             });
 
             let mut renderer = match renderer {
                 Ok(r) => {
-                    log::info!("macOS native render window ready: {}x{}", width, height);
+                    log::info!("macOS render thread: renderer READY ({}x{})", width, height);
                     r
                 }
                 Err(e) => {
-                    log::error!("Failed to create wgpu renderer: {}", e);
+                    log::error!("macOS render thread: FAILED to create renderer: {}", e);
                     is_open.store(false, Ordering::Relaxed);
                     return;
                 }
@@ -290,6 +291,7 @@ impl RenderWindow {
 
             let mut current_format = FrameFormat::BGRA;
             let mut check_counter: u32 = 0;
+            let mut render_frame_count: u32 = 0;
 
             // Simple render loop (no winit event loop needed)
             loop {
@@ -305,9 +307,14 @@ impl RenderWindow {
                         WindowCommand::RenderFrame(frame) => {
                             current_format = frame.format;
                             if let Err(e) = renderer.upload_frame(&frame) {
-                                log::error!("Failed to upload frame: {}", e);
+                                log::error!("Render thread: Failed to upload frame: {}", e);
                             }
                             has_new_frame = true;
+                            render_frame_count += 1;
+                            if render_frame_count <= 5 || render_frame_count % 50 == 0 {
+                                log::info!("Render thread: frame {} received and uploaded ({}x{}, {:?})",
+                                    render_frame_count, frame.width, frame.height, frame.format);
+                            }
                         }
                         WindowCommand::SetTitle(_title) => {
                             // TODO: dispatch to main thread to update NSWindow title
