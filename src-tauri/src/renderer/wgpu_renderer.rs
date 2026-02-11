@@ -181,12 +181,22 @@ impl WgpuRenderer {
             .copied()
             .unwrap_or(capabilities.formats[0]);
 
+        // Pick the best present mode from what's supported
+        let present_mode = if capabilities.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else if capabilities.present_modes.contains(&wgpu::PresentMode::Immediate) {
+            wgpu::PresentMode::Immediate
+        } else {
+            wgpu::PresentMode::Fifo // always supported
+        };
+        log::info!("wgpu present mode: {:?} (available: {:?})", present_mode, capabilities.present_modes);
+
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width: width.max(1),
             height: height.max(1),
-            present_mode: wgpu::PresentMode::Mailbox,
+            present_mode,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,

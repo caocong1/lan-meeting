@@ -268,7 +268,9 @@ impl RenderWindow {
         log::debug!("wgpu Surface created on main thread");
 
         // Spawn render thread with pre-created instance + surface
+        let is_open_for_panic = is_open.clone();
         std::thread::spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             log::debug!("macOS render thread started");
 
             // Initialize wgpu renderer with instance + surface created on main thread
@@ -368,6 +370,19 @@ impl RenderWindow {
             }
 
             log::info!("macOS render thread ended");
+            })); // end catch_unwind
+
+            if let Err(panic_info) = result {
+                let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "unknown panic".to_string()
+                };
+                log::error!("macOS render thread PANICKED: {}", msg);
+                is_open_for_panic.store(false, Ordering::Relaxed);
+            }
         });
 
         Ok(())
