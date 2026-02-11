@@ -214,43 +214,61 @@ impl RenderWindow {
         let ns_view_addr = ns_view.0.as_ptr() as usize;
         let ns_window_addr = _ns_window.0.as_ptr() as usize;
 
-        // Spawn render thread with wgpu
+        // Create wgpu Instance + Surface on main thread
+        // (Metal's get_metal_layer MUST be called on the UI thread)
+        let (surface_tx, surface_rx) =
+            std::sync::mpsc::channel::<Result<wgpu::Surface<'static>, String>>();
+
+        app_handle
+            .run_on_main_thread(move || {
+                let result = (|| -> Result<wgpu::Surface<'static>, String> {
+                    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                        backends: wgpu::Backends::METAL,
+                        ..Default::default()
+                    });
+
+                    let ns_view_ptr =
+                        std::ptr::NonNull::new(ns_view_addr as *mut std::ffi::c_void)
+                            .ok_or_else(|| "NSView pointer was null".to_string())?;
+
+                    unsafe {
+                        let raw_display = raw_window_handle::RawDisplayHandle::AppKit(
+                            raw_window_handle::AppKitDisplayHandle::new(),
+                        );
+                        let raw_window = raw_window_handle::RawWindowHandle::AppKit(
+                            raw_window_handle::AppKitWindowHandle::new(ns_view_ptr),
+                        );
+                        instance
+                            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                                raw_display_handle: raw_display,
+                                raw_window_handle: raw_window,
+                            })
+                            .map_err(|e| format!("Failed to create surface: {}", e))
+                    }
+                })();
+                let _ = surface_tx.send(result);
+            })
+            .map_err(|e| {
+                RendererError::WindowError(format!(
+                    "Failed to dispatch surface creation: {}",
+                    e
+                ))
+            })?;
+
+        let surface = surface_rx
+            .recv()
+            .map_err(|e| {
+                RendererError::WindowError(format!("Surface channel closed: {}", e))
+            })?
+            .map_err(|e| RendererError::WindowError(format!("Surface creation failed: {}", e)))?;
+
+        log::debug!("wgpu Surface created on main thread");
+
+        // Spawn render thread with pre-created surface
         std::thread::spawn(move || {
             log::debug!("macOS render thread started");
 
-            // Reconstruct the NonNull pointer from address
-            let ns_view_ptr = std::ptr::NonNull::new(ns_view_addr as *mut std::ffi::c_void)
-                .expect("NSView pointer was null");
-
-            // Create wgpu surface from raw NSView pointer
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                backends: wgpu::Backends::METAL,
-                ..Default::default()
-            });
-
-            let surface = unsafe {
-                let raw_display =
-                    raw_window_handle::RawDisplayHandle::AppKit(
-                        raw_window_handle::AppKitDisplayHandle::new(),
-                    );
-                let raw_window =
-                    raw_window_handle::RawWindowHandle::AppKit(
-                        raw_window_handle::AppKitWindowHandle::new(ns_view_ptr),
-                    );
-                match instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                    raw_display_handle: raw_display,
-                    raw_window_handle: raw_window,
-                }) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        log::error!("Failed to create wgpu surface: {}", e);
-                        is_open.store(false, Ordering::Relaxed);
-                        return;
-                    }
-                }
-            };
-
-            // Initialize wgpu renderer
+            // Initialize wgpu renderer with surface created on main thread
             let renderer = pollster::block_on(async {
                 WgpuRenderer::new_with_raw_surface(surface, width, height).await
             });
