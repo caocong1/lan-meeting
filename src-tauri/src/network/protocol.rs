@@ -49,6 +49,9 @@ pub enum MessageType {
     FileChunk = 0x43,
     FileComplete = 0x44,
     FileCancel = 0x45,
+
+    // Simple streaming (0x50-0x5F)
+    SimpleScreenRequest = 0x50,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -77,6 +80,7 @@ impl TryFrom<u8> for MessageType {
             0x43 => Ok(Self::FileChunk),
             0x44 => Ok(Self::FileComplete),
             0x45 => Ok(Self::FileCancel),
+            0x50 => Ok(Self::SimpleScreenRequest),
             _ => Err(NetworkError::ProtocolError(format!(
                 "Unknown message type: 0x{:02X}",
                 value
@@ -182,6 +186,11 @@ pub enum Message {
     FileCancel {
         file_id: String,
     },
+
+    // Simple streaming (minimal pipeline for debugging)
+    SimpleScreenRequest {
+        display_id: u32,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +274,7 @@ impl Message {
             Message::FileChunk { .. } => MessageType::FileChunk,
             Message::FileComplete { .. } => MessageType::FileComplete,
             Message::FileCancel { .. } => MessageType::FileCancel,
+            Message::SimpleScreenRequest { .. } => MessageType::SimpleScreenRequest,
         }
     }
 }

@@ -903,3 +903,43 @@ pub async fn request_control(peer_id: String) -> Result<(), String> {
 
     Ok(())
 }
+
+// ===== Simple streaming commands (minimal pipeline for debugging) =====
+
+/// Start simple screen sharing (OpenH264 only, no optimizations)
+#[tauri::command]
+pub async fn simple_start_sharing(display_id: u32) -> Result<(), String> {
+    log::info!("[SIMPLE] Command: simple_start_sharing(display_id={})", display_id);
+    crate::simple_streaming::start_sharing(display_id)
+}
+
+/// Request simple screen stream from a peer
+#[tauri::command]
+pub async fn simple_request_stream(peer_ip: String) -> Result<(), String> {
+    use crate::network::protocol;
+
+    log::info!("[SIMPLE] Command: simple_request_stream(peer_ip={})", peer_ip);
+
+    // Ensure connection
+    ensure_peer_connection(&peer_ip).await?;
+
+    // Send SimpleScreenRequest to the sharer
+    let msg = protocol::Message::SimpleScreenRequest { display_id: 0 };
+    let encoded = protocol::encode(&msg)
+        .map_err(|e| format!("[SIMPLE] Failed to encode request: {}", e))?;
+
+    quic::send_to_peer(&peer_ip, &encoded)
+        .await
+        .map_err(|e| format!("[SIMPLE] Failed to send request to {}: {}", peer_ip, e))?;
+
+    log::info!("[SIMPLE] Request sent to {}", peer_ip);
+    Ok(())
+}
+
+/// Stop simple screen sharing
+#[tauri::command]
+pub async fn simple_stop_sharing() -> Result<(), String> {
+    log::info!("[SIMPLE] Command: simple_stop_sharing");
+    crate::simple_streaming::stop_sharing();
+    Ok(())
+}

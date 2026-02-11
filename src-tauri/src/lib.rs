@@ -9,6 +9,7 @@ pub mod encoder;
 pub mod input;
 pub mod network;
 pub mod renderer;
+pub mod simple_streaming;
 pub mod streaming;
 pub mod transfer;
 
@@ -90,6 +91,10 @@ pub fn run() {
             commands::request_control,
             commands::request_screen_stream,
             commands::stop_viewing_stream,
+            // Simple streaming commands
+            commands::simple_start_sharing,
+            commands::simple_request_stream,
+            commands::simple_stop_sharing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -107,9 +112,39 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
             Ok(mut stream) => {
                 let conn_clone = conn.clone();
                 tokio::spawn(async move {
-                    let mut codec = MessageCodec::new();
+                    // Read first message to detect if this is a simple stream
+                    let first_data = match stream.recv_framed().await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            log::debug!("Stream closed on first read: {}", e);
+                            return;
+                        }
+                    };
 
-                    // Handle stream messages
+                    // Check if this is a simple streaming message
+                    if simple_streaming::is_simple_message(&first_data) {
+                        let peer_ip = conn_clone.remote_addr().ip().to_string();
+                        log::info!("[SIMPLE] Detected simple stream from {}", peer_ip);
+
+                        // Handle the first message manually, then pass to handler
+                        // We need to re-process the first message since we already consumed it
+                        // Create a wrapper that first yields the already-read data
+                        handle_simple_stream_with_first(&first_data, &mut stream, &peer_ip).await;
+                        return;
+                    }
+
+                    // Normal protocol message path
+                    let mut codec = MessageCodec::new();
+                    codec.feed(&first_data);
+
+                    // Process messages from the first read
+                    while let Ok(Some(msg)) = codec.decode() {
+                        if let Err(e) = handle_message(&msg, &mut stream, &conn_clone).await {
+                            log::error!("Failed to handle message: {}", e);
+                        }
+                    }
+
+                    // Handle subsequent stream messages
                     loop {
                         match stream.recv_framed().await {
                             Ok(data) => {
@@ -394,6 +429,18 @@ async fn handle_message(
             }
         }
 
+        // Simple streaming request (minimal pipeline)
+        Message::SimpleScreenRequest { display_id } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            log::info!("[SIMPLE] Received SimpleScreenRequest from {} (display={})", remote_ip, display_id);
+
+            // Handle in a background task - this will open a persistent stream and stream frames
+            let peer_ip = remote_ip.clone();
+            tokio::spawn(async move {
+                simple_streaming::handle_viewer_request(&peer_ip).await;
+            });
+        }
+
         // Remote control messages will be handled in Phase 6
         Message::ControlRequest { .. }
         | Message::ControlGrant { .. }
@@ -557,4 +604,206 @@ async fn handle_message(
     }
 
     Ok(())
+}
+
+/// Handle a simple stream where the first message was already consumed
+async fn handle_simple_stream_with_first(
+    first_data: &[u8],
+    stream: &mut network::quic::QuicStream,
+    peer_ip: &str,
+) {
+    log::info!("[SIMPLE] === Handling simple stream from {} ===", peer_ip);
+
+    let mut decoder: Option<crate::decoder::software::SoftwareDecoder> = None;
+    let mut window_handle: Option<crate::renderer::RenderWindowHandle> = None;
+    let mut frame_count: u32 = 0;
+
+    // Process the first message
+    process_simple_message(first_data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
+
+    // Continue reading from stream
+    loop {
+        let data = match stream.recv_framed().await {
+            Ok(d) => d,
+            Err(e) => {
+                log::info!("[SIMPLE] Stream closed from {}: {}", peer_ip, e);
+                break;
+            }
+        };
+
+        if data.is_empty() {
+            continue;
+        }
+
+        let msg_type = data[0];
+        if msg_type == 0x03 {
+            // MSG_TYPE_STOP
+            log::info!("[SIMPLE] Received Stop message from {}", peer_ip);
+            break;
+        }
+
+        process_simple_message(&data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
+    }
+
+    // Cleanup
+    if let Some(handle) = window_handle.as_ref() {
+        handle.close();
+    }
+    log::info!("[SIMPLE] Simple stream handler ended, {} frames rendered", frame_count);
+}
+
+/// Process a single simple streaming message
+fn process_simple_message(
+    data: &[u8],
+    peer_ip: &str,
+    decoder: &mut Option<crate::decoder::software::SoftwareDecoder>,
+    window_handle: &mut Option<crate::renderer::RenderWindowHandle>,
+    frame_count: &mut u32,
+) {
+    use crate::decoder::software::SoftwareDecoder;
+    use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
+    use crate::renderer::{RenderFrame, RenderWindow};
+
+    if data.is_empty() {
+        return;
+    }
+
+    let msg_type = data[0];
+
+    match msg_type {
+        0x01 => {
+            // MSG_TYPE_START
+            if data.len() < 9 {
+                log::error!("[SIMPLE] ScreenStart message too short: {} bytes", data.len());
+                return;
+            }
+
+            let width = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
+            let height = u32::from_be_bytes([data[5], data[6], data[7], data[8]]);
+
+            log::info!("[SIMPLE] Received ScreenStart: {}x{} from {}", width, height, peer_ip);
+
+            // Init decoder
+            let mut dec = match SoftwareDecoder::new() {
+                Ok(d) => d,
+                Err(e) => {
+                    log::error!("[SIMPLE] Failed to create decoder: {}", e);
+                    return;
+                }
+            };
+
+            let config = DecoderConfig {
+                width,
+                height,
+                output_format: OutputFormat::BGRA,
+            };
+
+            if let Err(e) = dec.init(config) {
+                log::error!("[SIMPLE] Failed to init decoder: {}", e);
+                return;
+            }
+            log::info!("[SIMPLE] Decoder initialized (OpenH264 software)");
+
+            // Create render window
+            let title = format!("[Simple] {} screen", peer_ip);
+            match RenderWindow::create(&title, width, height) {
+                Ok(handle) => {
+                    log::info!("[SIMPLE] Render window created: {}x{}", width, height);
+                    *window_handle = Some(handle);
+                }
+                Err(e) => {
+                    log::error!("[SIMPLE] Failed to create render window: {}", e);
+                    return;
+                }
+            }
+
+            *decoder = Some(dec);
+            *frame_count = 0;
+        }
+
+        0x02 => {
+            // MSG_TYPE_FRAME
+            if data.len() < 13 {
+                log::warn!("[SIMPLE] Frame message too short: {} bytes", data.len());
+                return;
+            }
+
+            let timestamp = u64::from_be_bytes([
+                data[1], data[2], data[3], data[4],
+                data[5], data[6], data[7], data[8],
+            ]);
+            let frame_len = u32::from_be_bytes([data[9], data[10], data[11], data[12]]) as usize;
+
+            if data.len() < 13 + frame_len {
+                log::warn!("[SIMPLE] Frame data truncated: expected {} bytes, got {}",
+                    13 + frame_len, data.len());
+                return;
+            }
+
+            let frame_data = &data[13..13 + frame_len];
+
+            // Check window is still open
+            match window_handle.as_ref() {
+                Some(handle) => {
+                    if !handle.is_open() {
+                        log::info!("[SIMPLE] Render window closed by user");
+                        return;
+                    }
+                }
+                None => {
+                    if *frame_count == 0 {
+                        log::warn!("[SIMPLE] Frame received but no window (missing ScreenStart?)");
+                    }
+                    return;
+                }
+            }
+
+            // Decode
+            let Some(dec) = decoder.as_mut() else {
+                if *frame_count == 0 {
+                    log::warn!("[SIMPLE] Frame received but no decoder");
+                }
+                return;
+            };
+
+            match dec.decode(frame_data, timestamp) {
+                Ok(Some(decoded)) => {
+                    if let Some(cpu_data) = decoded.cpu_data() {
+                        let render_frame = RenderFrame::from_bgra(
+                            decoded.width,
+                            decoded.height,
+                            cpu_data.to_vec(),
+                        );
+
+                        if let Some(handle) = window_handle.as_ref() {
+                            if let Err(e) = handle.render_frame(render_frame) {
+                                if *frame_count % 100 == 0 {
+                                    log::warn!("[SIMPLE] Render error: {}", e);
+                                }
+                            }
+                        }
+                    }
+
+                    *frame_count += 1;
+                    if *frame_count == 1 || *frame_count % 50 == 0 {
+                        log::info!("[SIMPLE] Frame {} decoded and rendered", frame_count);
+                    }
+                }
+                Ok(None) => {
+                    if *frame_count == 0 {
+                        log::debug!("[SIMPLE] Decoder buffering (no output yet)");
+                    }
+                }
+                Err(e) => {
+                    if *frame_count % 100 == 0 {
+                        log::warn!("[SIMPLE] Decode error at frame {}: {}", frame_count, e);
+                    }
+                }
+            }
+        }
+
+        _ => {
+            log::warn!("[SIMPLE] Unknown message type: 0x{:02x}", msg_type);
+        }
+    }
 }

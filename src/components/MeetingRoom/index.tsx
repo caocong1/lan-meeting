@@ -23,6 +23,7 @@ interface MeetingRoomProps {
 export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
   const [members, setMembers] = createSignal<Member[]>([]);
   const [isSharing, setIsSharing] = createSignal(false);
+  const [isSimpleSharing, setIsSimpleSharing] = createSignal(false);
   const [isLoadingMembers, setIsLoadingMembers] = createSignal(true);
   const [showAddModal, setShowAddModal] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -170,6 +171,50 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
+  // ===== Simple streaming handlers (minimal pipeline for debugging) =====
+
+  const handleSimpleStartSharing = async () => {
+    try {
+      const hasPermission = await invoke<boolean>("check_screen_permission");
+      if (!hasPermission) {
+        await invoke("request_screen_permission");
+        return;
+      }
+
+      const displays = await invoke<any[]>("get_displays");
+      if (displays.length === 0) {
+        setError("未找到可共享的显示器");
+        return;
+      }
+
+      const displayId = displays[0].id;
+      await invoke("simple_start_sharing", { displayId });
+      setIsSimpleSharing(true);
+    } catch (e) {
+      console.error("[SIMPLE] Failed to start sharing:", e);
+      setError(`[Simple] 启动共享失败: ${e}`);
+    }
+  };
+
+  const handleSimpleStopSharing = async () => {
+    try {
+      await invoke("simple_stop_sharing");
+      setIsSimpleSharing(false);
+    } catch (e) {
+      console.error("[SIMPLE] Failed to stop sharing:", e);
+      setError(`[Simple] 停止共享失败: ${e}`);
+    }
+  };
+
+  const handleSimpleWatch = async (member: Member) => {
+    try {
+      await invoke("simple_request_stream", { peerIp: member.ip });
+    } catch (e) {
+      console.error("[SIMPLE] Failed to request stream:", e);
+      setError(`[Simple] 请求屏幕流失败: ${e}`);
+    }
+  };
+
   // Setup event listeners
   onMount(async () => {
     unlistenDiscovered = await listen<any>("device-discovered", (event) => {
@@ -242,6 +287,24 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
               >
                 <span class="i-lucide-cast"></span>
                 开始共享
+              </button>
+            )}
+
+            {/* Simple Share Button (debugging) */}
+            {isSimpleSharing() ? (
+              <button
+                class="px-4 py-2 bg-orange-500 hover:bg-orange-600 text-white text-sm font-medium rounded-lg flex items-center gap-2"
+                onClick={handleSimpleStopSharing}
+              >
+                <span class="w-2 h-2 bg-white rounded-full animate-pulse"></span>
+                Simple Stop
+              </button>
+            ) : (
+              <button
+                class="px-4 py-2 bg-orange-400 hover:bg-orange-500 text-white text-sm font-medium rounded-lg flex items-center gap-2"
+                onClick={handleSimpleStartSharing}
+              >
+                Simple Share
               </button>
             )}
 
@@ -342,6 +405,12 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                               观看
                             </button>
                             <button
+                              class="px-3 py-1.5 bg-orange-400 hover:bg-orange-500 text-white text-sm rounded-lg"
+                              onClick={() => handleSimpleWatch(member)}
+                            >
+                              Simple
+                            </button>
+                            <button
                               class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg"
                               onClick={() => handleRequestControl(member)}
                             >
@@ -351,7 +420,17 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                         )}
                       </>
                     ) : (
-                      <span class="text-sm text-gray-400">未共享</span>
+                      <div class="flex items-center gap-2">
+                        <span class="text-sm text-gray-400">未共享</span>
+                        {!member.is_self && (
+                          <button
+                            class="px-3 py-1.5 bg-orange-400 hover:bg-orange-500 text-white text-sm rounded-lg"
+                            onClick={() => handleSimpleWatch(member)}
+                          >
+                            Simple Watch
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
