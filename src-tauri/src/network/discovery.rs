@@ -124,10 +124,13 @@ fn register_service(daemon: &ServiceDaemon) -> Result<(), NetworkError> {
         lan_ips.join(",")
     };
 
+    // Use instance_name (includes UUID) as host_name to avoid conflicting
+    // with macOS's built-in Bonjour registration of the real hostname
+    let service_host = format!("{}.local.", instance_name);
     let service_info = ServiceInfo::new(
         SERVICE_TYPE,
         &instance_name,
-        &format!("{}.local.", hostname),
+        &service_host,
         &ip_str,
         SERVICE_PORT,
         properties,
