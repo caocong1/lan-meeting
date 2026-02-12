@@ -403,6 +403,26 @@ impl QuicStream {
         Ok(data)
     }
 
+    /// Try to receive a framed message without blocking.
+    /// Returns Ok(Some(data)) if available, Ok(None) if nothing ready.
+    pub async fn try_recv_framed(&mut self) -> Result<Option<Vec<u8>>, NetworkError> {
+        let mut len_buf = [0u8; 4];
+        match tokio::time::timeout(std::time::Duration::ZERO, self.recv.read_exact(&mut len_buf)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(NetworkError::ConnectionFailed(format!("Recv length error: {}", e))),
+            Err(_) => return Ok(None), // no data ready
+        }
+
+        let len = u32::from_be_bytes(len_buf) as usize;
+        let mut data = vec![0u8; len];
+        self.recv
+            .read_exact(&mut data)
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Recv data error: {}", e)))?;
+
+        Ok(Some(data))
+    }
+
     /// Finish sending (close send side)
     pub async fn finish(&mut self) -> Result<(), NetworkError> {
         self.send

@@ -640,12 +640,33 @@ async fn handle_simple_stream_with_first(
     // Continue reading from stream
     log::info!("[SIMPLE] Entering frame receive loop from {}", peer_ip);
     loop {
-        let data = match stream.recv_framed().await {
-            Ok(d) => d,
-            Err(e) => {
+        // Poll window events (resolution requests)
+        if let Some(ref handle) = window_handle {
+            while let Some(event) = handle.try_recv_event() {
+                if let crate::renderer::WindowEvent::ResolutionRequested(target_w, target_h, bitrate) = event {
+                    log::info!("[SIMPLE] Viewer requesting resolution {}x{} @ {} bps", target_w, target_h, bitrate);
+                    let req = crate::simple_streaming::encode_resolution_request_msg(target_w, target_h, bitrate);
+                    if let Err(e) = stream.send_framed(&req).await {
+                        log::error!("[SIMPLE] Failed to send resolution request: {}", e);
+                    }
+                }
+            }
+            if !handle.is_open() {
+                log::info!("[SIMPLE] Render window closed by user");
+                break;
+            }
+        }
+
+        let data = match tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            stream.recv_framed(),
+        ).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
                 log::info!("[SIMPLE] Stream closed from {}: {}", peer_ip, e);
                 break;
             }
+            Err(_) => continue, // timeout, loop back to poll events
         };
 
         if data.is_empty() {
@@ -725,18 +746,20 @@ fn process_simple_message(
                 log::error!("[SIMPLE] Failed to init decoder: {}", e);
                 return;
             }
-            log::info!("[SIMPLE] Decoder initialized (OpenH264 software)");
+            log::info!("[SIMPLE] Decoder (re)initialized for {}x{}", width, height);
 
-            // Create render window
-            let title = format!("[Simple] {} screen", peer_ip);
-            match RenderWindow::create(&title, width, height) {
-                Ok(handle) => {
-                    log::info!("[SIMPLE] Render window created: {}x{}", width, height);
-                    *window_handle = Some(handle);
-                }
-                Err(e) => {
-                    log::error!("[SIMPLE] Failed to create render window: {}", e);
-                    return;
+            // Only create window if not already open (resolution changes keep existing window)
+            if window_handle.is_none() {
+                let title = format!("[Simple] {} screen", peer_ip);
+                match RenderWindow::create(&title, width, height) {
+                    Ok(handle) => {
+                        log::info!("[SIMPLE] Render window created: {}x{}", width, height);
+                        *window_handle = Some(handle);
+                    }
+                    Err(e) => {
+                        log::error!("[SIMPLE] Failed to create render window: {}", e);
+                        return;
+                    }
                 }
             }
 

@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 const MSG_TYPE_START: u8 = 0x01;
 const MSG_TYPE_FRAME: u8 = 0x02;
 const MSG_TYPE_STOP: u8 = 0x03;
+const MSG_TYPE_RESOLUTION_REQUEST: u8 = 0x04; // viewer → sharer
 
 /// Hardcoded FPS for simplicity
 const SIMPLE_FPS: u32 = 30;
@@ -28,6 +29,37 @@ const SIMPLE_FPS: u32 = 30;
 /// Target encode resolution (downscale from capture resolution)
 const SIMPLE_TARGET_WIDTH: u32 = 1280;
 const SIMPLE_TARGET_HEIGHT: u32 = 720;
+
+/// Resolution option for toolbar
+#[derive(Debug, Clone, Copy)]
+pub struct ResolutionOption {
+    pub label: &'static str,
+    pub target_width: u32,
+    pub target_height: u32,
+}
+
+/// Bitrate option for toolbar
+#[derive(Debug, Clone, Copy)]
+pub struct BitrateOption {
+    pub label: &'static str,
+    pub bitrate: u32,
+}
+
+/// Available resolution options (independent of bitrate)
+pub const RESOLUTION_OPTIONS: [ResolutionOption; 4] = [
+    ResolutionOption { label: "720p",     target_width: 1280, target_height: 720 },
+    ResolutionOption { label: "1080p",    target_width: 1920, target_height: 1080 },
+    ResolutionOption { label: "1440p",    target_width: 2560, target_height: 1440 },
+    ResolutionOption { label: "Original", target_width: 3840, target_height: 2160 },
+];
+
+/// Available bitrate options (independent of resolution)
+pub const BITRATE_OPTIONS: [BitrateOption; 4] = [
+    BitrateOption { label: "2 Mbps",  bitrate: 2_000_000 },
+    BitrateOption { label: "4 Mbps",  bitrate: 4_000_000 },
+    BitrateOption { label: "8 Mbps",  bitrate: 8_000_000 },
+    BitrateOption { label: "12 Mbps", bitrate: 12_000_000 },
+];
 
 // ===== Global state =====
 
@@ -209,6 +241,63 @@ pub async fn handle_viewer_request(peer_ip: &str) {
             break;
         }
 
+        // Check for resolution change request from viewer (non-blocking)
+        match stream.try_recv_framed().await {
+            Ok(Some(req_data)) if req_data.len() >= 13 && req_data[0] == MSG_TYPE_RESOLUTION_REQUEST => {
+                let new_target_w = u32::from_be_bytes([req_data[1], req_data[2], req_data[3], req_data[4]]);
+                let new_target_h = u32::from_be_bytes([req_data[5], req_data[6], req_data[7], req_data[8]]);
+                let bitrate = u32::from_be_bytes([req_data[9], req_data[10], req_data[11], req_data[12]]);
+                log::info!("[SIMPLE] Resolution change requested: {}x{} @ {} bps", new_target_w, new_target_h, bitrate);
+
+                // Reconfigure scaler
+                let src_w = state.pre_scaler.src_width;
+                let src_h = state.pre_scaler.src_height;
+                state.pre_scaler = FrameScaler::new_with_target(src_w, src_h, new_target_w, new_target_h);
+                let new_encode_w = state.pre_scaler.dst_width;
+                let new_encode_h = state.pre_scaler.dst_height;
+
+                // Recreate encoder with new dimensions
+                match encoder::create_encoder() {
+                    Ok(mut new_encoder) => {
+                        let enc_config = EncoderConfig {
+                            width: new_encode_w,
+                            height: new_encode_h,
+                            fps: SIMPLE_FPS,
+                            bitrate,
+                            max_bitrate: bitrate * 2,
+                            keyframe_interval: SIMPLE_FPS,
+                            preset: EncoderPreset::UltraFast,
+                        };
+                        if let Err(e) = new_encoder.init(enc_config) {
+                            log::error!("[SIMPLE] Failed to reinit encoder: {}", e);
+                        } else {
+                            state.encoder = new_encoder;
+                            state.encode_width = new_encode_w;
+                            state.encode_height = new_encode_h;
+                            log::info!("[SIMPLE] Encoder reconfigured: {}x{} @ {} bps", new_encode_w, new_encode_h, bitrate);
+
+                            // Send new START message so viewer reinits decoder
+                            let start_data = encode_start_message(new_encode_w, new_encode_h);
+                            if let Err(e) = stream.send_framed(&start_data).await {
+                                log::error!("[SIMPLE] Failed to send new ScreenStart: {}", e);
+                                break;
+                            }
+                            log::info!("[SIMPLE] Sent new ScreenStart ({}x{}) after resolution change", new_encode_w, new_encode_h);
+                            sequence = 0;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("[SIMPLE] Failed to create new encoder: {}", e);
+                    }
+                }
+            }
+            Ok(Some(_)) => {} // unknown message from viewer, ignore
+            Ok(None) => {} // no message ready
+            Err(e) => {
+                log::debug!("[SIMPLE] Error reading from viewer: {}", e);
+            }
+        }
+
         // Frame rate limiting
         let elapsed = last_frame_time.elapsed();
         if elapsed < frame_interval {
@@ -319,6 +408,8 @@ pub fn stop_sharing() {
 /// Handle an incoming stream that carries simple streaming data.
 /// Called when we detect a simple stream message on an accepted bi-stream.
 pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
+    use crate::renderer::WindowEvent;
+
     log::info!("[SIMPLE] === Handling simple stream from {} ===", peer_ip);
 
     let mut decoder: Option<SoftwareDecoder> = None;
@@ -326,13 +417,41 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
     let mut frame_count: u32 = 0;
 
     loop {
-        // Receive next framed message
-        let data = match stream.recv_framed().await {
-            Ok(d) => d,
-            Err(e) => {
+        // Poll window events (resolution requests, close) between frame receives
+        if let Some(ref handle) = window_handle {
+            while let Some(event) = handle.try_recv_event() {
+                match event {
+                    WindowEvent::ResolutionRequested(target_w, target_h, bitrate) => {
+                        log::info!("[SIMPLE] Viewer requesting resolution {}x{} @ {} bps", target_w, target_h, bitrate);
+                        let req = encode_resolution_request(target_w, target_h, bitrate);
+                        if let Err(e) = stream.send_framed(&req).await {
+                            log::error!("[SIMPLE] Failed to send resolution request: {}", e);
+                        }
+                    }
+                    WindowEvent::CloseRequested => {
+                        log::info!("[SIMPLE] Window close requested by user");
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !handle.is_open() {
+                log::info!("[SIMPLE] Render window closed by user");
+                break;
+            }
+        }
+
+        // Receive next framed message with timeout to allow event polling
+        let data = match tokio::time::timeout(
+            Duration::from_millis(100),
+            stream.recv_framed(),
+        ).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
                 log::info!("[SIMPLE] Stream closed from {}: {}", peer_ip, e);
                 break;
             }
+            Err(_) => continue, // timeout, loop back to poll events
         };
 
         if data.is_empty() {
@@ -354,7 +473,7 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
 
                 log::info!("[SIMPLE] Received ScreenStart: {}x{} from {}", width, height, peer_ip);
 
-                // Init decoder
+                // Init decoder (always reinit on START - handles resolution changes)
                 let mut dec = match SoftwareDecoder::new() {
                     Ok(d) => d,
                     Err(e) => {
@@ -373,18 +492,20 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                     log::error!("[SIMPLE] Failed to init decoder: {}", e);
                     break;
                 }
-                log::info!("[SIMPLE] Decoder initialized (OpenH264 software, output=YUV420)");
+                log::info!("[SIMPLE] Decoder (re)initialized for {}x{} (output=YUV420)", width, height);
 
-                // Create render window
-                let title = format!("[Simple] {} screen", peer_ip);
-                match RenderWindow::create(&title, width, height) {
-                    Ok(handle) => {
-                        log::info!("[SIMPLE] Render window created: {}x{}", width, height);
-                        window_handle = Some(handle);
-                    }
-                    Err(e) => {
-                        log::error!("[SIMPLE] Failed to create render window: {}", e);
-                        break;
+                // Only create window if not already open (resolution changes keep existing window)
+                if window_handle.is_none() {
+                    let title = format!("[Simple] {} screen", peer_ip);
+                    match RenderWindow::create(&title, width, height) {
+                        Ok(handle) => {
+                            log::info!("[SIMPLE] Render window created: {}x{}", width, height);
+                            window_handle = Some(handle);
+                        }
+                        Err(e) => {
+                            log::error!("[SIMPLE] Failed to create render window: {}", e);
+                            break;
+                        }
                     }
                 }
 
@@ -547,11 +668,25 @@ fn encode_stop_message() -> Vec<u8> {
     vec![MSG_TYPE_STOP]
 }
 
+fn encode_resolution_request(target_width: u32, target_height: u32, bitrate: u32) -> Vec<u8> {
+    let mut data = Vec::with_capacity(13);
+    data.push(MSG_TYPE_RESOLUTION_REQUEST);
+    data.extend_from_slice(&target_width.to_be_bytes());
+    data.extend_from_slice(&target_height.to_be_bytes());
+    data.extend_from_slice(&bitrate.to_be_bytes());
+    data
+}
+
+/// Public wrapper for encoding resolution request (used by lib.rs)
+pub fn encode_resolution_request_msg(target_width: u32, target_height: u32, bitrate: u32) -> Vec<u8> {
+    encode_resolution_request(target_width, target_height, bitrate)
+}
+
 /// Check if a framed message is a simple streaming message
 /// (first byte after recv_framed is one of our message types)
 pub fn is_simple_message(data: &[u8]) -> bool {
     if data.is_empty() {
         return false;
     }
-    matches!(data[0], MSG_TYPE_START | MSG_TYPE_FRAME | MSG_TYPE_STOP)
+    matches!(data[0], MSG_TYPE_START | MSG_TYPE_FRAME | MSG_TYPE_STOP | MSG_TYPE_RESOLUTION_REQUEST)
 }

@@ -27,6 +27,7 @@ pub enum WindowEvent {
     MouseMoved(f64, f64),
     MouseButton(u32, bool), // button, pressed
     MouseWheel(f64, f64),
+    ResolutionRequested(u32, u32, u32), // (target_width, target_height, bitrate) from toolbar
 }
 
 /// Command to the render window
@@ -214,6 +215,29 @@ impl RenderWindow {
         let ns_view_addr = ns_view.0.as_ptr() as usize;
         let ns_window_addr = _ns_window.0.as_ptr() as usize;
 
+        // Create floating toolbar on main thread
+        let (toolbar_tx, toolbar_rx) =
+            std::sync::mpsc::channel::<Result<(usize, usize, usize), String>>();
+
+        let content_view_addr = ns_view_addr;
+        app_handle
+            .run_on_main_thread(move || {
+                let result = create_toolbar(content_view_addr, width);
+                let _ = toolbar_tx.send(result);
+            })
+            .map_err(|e| {
+                RendererError::WindowError(format!("Failed to dispatch toolbar creation: {}", e))
+            })?;
+
+        let (toolbar_view_addr, res_popup_addr, br_popup_addr) = toolbar_rx
+            .recv()
+            .map_err(|e| {
+                RendererError::WindowError(format!("Toolbar channel closed: {}", e))
+            })?
+            .map_err(|e| RendererError::WindowError(format!("Toolbar creation failed: {}", e)))?;
+
+        log::debug!("Floating toolbar created on main thread");
+
         // Create wgpu Instance + Surface on main thread
         // (Metal's get_metal_layer MUST be called on the UI thread)
         let (surface_tx, surface_rx) =
@@ -296,6 +320,15 @@ impl RenderWindow {
             let mut render_frame_count: u32 = 0;
             let mut last_surface_w: u32 = width;
             let mut last_surface_h: u32 = height;
+
+            // Toolbar state
+            let mut toolbar_visible = false;
+            let mut last_mouse_x: f64 = -1.0;
+            let mut last_mouse_y: f64 = -1.0;
+            let mut last_mouse_move_time = std::time::Instant::now();
+            let mut last_selected_resolution: isize = 0;
+            let mut last_selected_bitrate: isize = 0;
+            let toolbar_hide_delay = std::time::Duration::from_secs(3);
 
             // Simple render loop (no winit event loop needed)
             loop {
@@ -394,6 +427,91 @@ impl RenderWindow {
                         is_open.store(false, Ordering::Relaxed);
                         let _ = event_tx.send(WindowEvent::CloseRequested);
                         break;
+                    }
+                }
+
+                // Toolbar: mouse tracking + auto-hide + resolution polling
+                if check_counter % 10 == 0 { // every ~10ms
+                    let (mouse_in_window, mouse_x, mouse_y) = unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        let window_ptr = ns_window_addr as *mut AnyObject;
+                        let view = ns_view_addr as *mut AnyObject;
+
+                        let mouse_loc: objc2_foundation::NSPoint =
+                            msg_send![window_ptr, mouseLocationOutsideOfEventStream];
+                        let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
+
+                        let inside = mouse_loc.x >= 0.0
+                            && mouse_loc.y >= 0.0
+                            && mouse_loc.x <= bounds.size.width
+                            && mouse_loc.y <= bounds.size.height;
+
+                        (inside, mouse_loc.x, mouse_loc.y)
+                    };
+
+                    // Detect mouse movement
+                    let mouse_moved = (mouse_x - last_mouse_x).abs() > 1.0
+                        || (mouse_y - last_mouse_y).abs() > 1.0;
+                    if mouse_moved && mouse_in_window {
+                        last_mouse_move_time = std::time::Instant::now();
+                    }
+                    last_mouse_x = mouse_x;
+                    last_mouse_y = mouse_y;
+
+                    let should_show = mouse_in_window
+                        && last_mouse_move_time.elapsed() < toolbar_hide_delay;
+
+                    // Update toolbar visibility on state change
+                    if should_show != toolbar_visible {
+                        toolbar_visible = should_show;
+                        if let Some(handle) = crate::APP_HANDLE.get() {
+                            let tb_addr = toolbar_view_addr;
+                            let show = should_show;
+                            let _ = handle.run_on_main_thread(move || unsafe {
+                                use objc2::msg_send;
+                                use objc2::runtime::AnyObject;
+                                let tb = tb_addr as *mut AnyObject;
+                                let _: () = msg_send![tb, setHidden: !show];
+                            });
+                        }
+                    }
+
+                    // Poll both NSPopUpButtons (~every 100ms)
+                    if check_counter % 100 == 0 {
+                        let res_selected: isize = unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let popup = res_popup_addr as *mut AnyObject;
+                            msg_send![popup, indexOfSelectedItem]
+                        };
+                        let br_selected: isize = unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let popup = br_popup_addr as *mut AnyObject;
+                            msg_send![popup, indexOfSelectedItem]
+                        };
+
+                        // Send event if either dropdown changed
+                        if (res_selected != last_selected_resolution || br_selected != last_selected_bitrate)
+                            && res_selected >= 0 && br_selected >= 0
+                        {
+                            last_selected_resolution = res_selected;
+                            last_selected_bitrate = br_selected;
+
+                            let res_opts = &crate::simple_streaming::RESOLUTION_OPTIONS;
+                            let br_opts = &crate::simple_streaming::BITRATE_OPTIONS;
+                            if let (Some(res), Some(br)) = (
+                                res_opts.get(res_selected as usize),
+                                br_opts.get(br_selected as usize),
+                            ) {
+                                log::info!("Toolbar: {} + {}",
+                                    res.label, br.label);
+                                let _ = event_tx.send(WindowEvent::ResolutionRequested(
+                                    res.target_width, res.target_height, br.bitrate,
+                                ));
+                            }
+                        }
                     }
                 }
 
@@ -524,6 +642,125 @@ fn create_ns_window(
         log::debug!("NSWindow created and displayed successfully");
 
         Ok((SendPtr(view_ptr), SendPtr(window_ptr)))
+    }
+}
+
+/// Create a floating toolbar with separate resolution and bitrate dropdowns.
+/// Returns (toolbar_view_addr, resolution_popup_addr, bitrate_popup_addr) as usize.
+/// Must be called on the main thread.
+#[cfg(target_os = "macos")]
+fn create_toolbar(content_view_addr: usize, _window_width: u32) -> Result<(usize, usize, usize), String> {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+
+    unsafe {
+        let content_view = content_view_addr as *mut AnyObject;
+        let bounds: NSRect = msg_send![content_view, bounds];
+
+        // Toolbar dimensions: wider to fit two dropdowns side by side
+        let toolbar_w: f64 = 320.0;
+        let toolbar_h: f64 = 36.0;
+        let toolbar_x = (bounds.size.width - toolbar_w) / 2.0;
+        let toolbar_y = bounds.size.height - toolbar_h - 8.0; // near top (macOS Y is bottom-up)
+
+        // Create toolbar container NSView
+        let view_cls = AnyClass::get(c"NSView").ok_or("NSView class not found")?;
+        let toolbar_alloc: *mut AnyObject = msg_send![view_cls, alloc];
+        let toolbar: *mut AnyObject = msg_send![toolbar_alloc, init];
+        if toolbar.is_null() {
+            return Err("NSView alloc failed".to_string());
+        }
+
+        let toolbar_frame = NSRect::new(
+            NSPoint::new(toolbar_x, toolbar_y),
+            NSSize::new(toolbar_w, toolbar_h),
+        );
+        let _: () = msg_send![toolbar, setFrame: toolbar_frame];
+        let _: () = msg_send![toolbar, setWantsLayer: true];
+
+        // Enable autoresizing to stay at top-center on window resize
+        // NSViewMinXMargin(1) | NSViewMaxXMargin(4) | NSViewMinYMargin(8)
+        let autoresizing: usize = 1 | 4 | 8;
+        let _: () = msg_send![toolbar, setAutoresizingMask: autoresizing];
+
+        // Style the layer: dark semi-transparent background with rounded corners
+        let layer: *mut AnyObject = msg_send![toolbar, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setCornerRadius: 10.0f64];
+
+            let ns_color_cls = AnyClass::get(c"NSColor").ok_or("NSColor not found")?;
+            let bg_color: *mut AnyObject = msg_send![
+                ns_color_cls,
+                colorWithRed: 0.0f64,
+                green: 0.0f64,
+                blue: 0.0f64,
+                alpha: 0.7f64
+            ];
+            let cg_color: *mut AnyObject = msg_send![bg_color, CGColor];
+            let _: () = msg_send![layer, setBackgroundColor: cg_color];
+        }
+
+        let popup_cls = AnyClass::get(c"NSPopUpButton").ok_or("NSPopUpButton not found")?;
+        let font_cls = AnyClass::get(c"NSFont").ok_or("NSFont not found")?;
+        let font: *mut AnyObject = msg_send![font_cls, systemFontOfSize: 12.0f64];
+
+        // --- Resolution dropdown (left side) ---
+        let popup_w: f64 = 140.0;
+        let res_frame = NSRect::new(
+            NSPoint::new(10.0, 4.0),
+            NSSize::new(popup_w, 28.0),
+        );
+        let res_alloc: *mut AnyObject = msg_send![popup_cls, alloc];
+        let res_popup: *mut AnyObject = msg_send![
+            res_alloc,
+            initWithFrame: res_frame,
+            pullsDown: false
+        ];
+        if res_popup.is_null() {
+            return Err("Resolution NSPopUpButton alloc failed".to_string());
+        }
+        let _: () = msg_send![res_popup, setFont: font];
+
+        for opt in &crate::simple_streaming::RESOLUTION_OPTIONS {
+            let ns_title = NSString::from_str(opt.label);
+            let _: () = msg_send![res_popup, addItemWithTitle: &*ns_title];
+        }
+        let _: () = msg_send![res_popup, selectItemAtIndex: 0isize];
+
+        // --- Bitrate dropdown (right side) ---
+        let br_frame = NSRect::new(
+            NSPoint::new(10.0 + popup_w + 10.0, 4.0),
+            NSSize::new(popup_w, 28.0),
+        );
+        let br_alloc: *mut AnyObject = msg_send![popup_cls, alloc];
+        let br_popup: *mut AnyObject = msg_send![
+            br_alloc,
+            initWithFrame: br_frame,
+            pullsDown: false
+        ];
+        if br_popup.is_null() {
+            return Err("Bitrate NSPopUpButton alloc failed".to_string());
+        }
+        let _: () = msg_send![br_popup, setFont: font];
+
+        for opt in &crate::simple_streaming::BITRATE_OPTIONS {
+            let ns_title = NSString::from_str(opt.label);
+            let _: () = msg_send![br_popup, addItemWithTitle: &*ns_title];
+        }
+        let _: () = msg_send![br_popup, selectItemAtIndex: 0isize];
+
+        // Add both popups to toolbar, toolbar to content view
+        let _: () = msg_send![toolbar, addSubview: res_popup];
+        let _: () = msg_send![toolbar, addSubview: br_popup];
+        let _: () = msg_send![content_view, addSubview: toolbar];
+
+        // Initially hidden
+        let _: () = msg_send![toolbar, setHidden: true];
+
+        log::debug!("Floating toolbar created with resolution + bitrate dropdowns");
+
+        Ok((toolbar as usize, res_popup as usize, br_popup as usize))
     }
 }
 
