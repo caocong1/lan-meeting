@@ -304,12 +304,34 @@ impl ScreenCapture for WindowsCapture {
             let result = duplication.AcquireNextFrame(100, &mut frame_info, &mut desktop_resource);
 
             if result.is_err() {
-                // Handle timeout or other errors
                 let err = result.unwrap_err();
-                if err.code().0 as u32 == 0x887A0027 {
-                    // DXGI_ERROR_WAIT_TIMEOUT
+                let code = err.code().0 as u32;
+
+                if code == 0x887A0027 {
+                    // DXGI_ERROR_WAIT_TIMEOUT - normal, no new frame
                     return Err(CaptureError::CaptureError("Frame timeout".to_string()));
                 }
+
+                if code == 0x887A0026 {
+                    // DXGI_ERROR_ACCESS_LOST - duplication invalidated
+                    // Drop all read guards before reinitializing
+                    drop(output_desc_guard);
+                    drop(staging_guard);
+                    drop(context_guard);
+                    drop(duplication_guard);
+
+                    log::warn!("DXGI_ERROR_ACCESS_LOST: reinitializing capture resources");
+                    if let Some(display_id) = *self.current_display.read() {
+                        self.release_resources();
+                        if let Err(e) = self.init_capture_resources(display_id) {
+                            log::error!("Failed to reinitialize capture after ACCESS_LOST: {}", e);
+                        } else {
+                            log::info!("Capture resources reinitialized after ACCESS_LOST");
+                        }
+                    }
+                    return Err(CaptureError::CaptureError("Access lost, reinitializing".to_string()));
+                }
+
                 return Err(CaptureError::CaptureError(format!(
                     "AcquireNextFrame failed: {}",
                     err
