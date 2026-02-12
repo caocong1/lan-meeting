@@ -485,24 +485,56 @@ pub fn find_connection(peer_id: &str) -> Option<Arc<QuicConnection>> {
         .map(|(_, conn)| conn.clone())
 }
 
-/// Remove dead connections from the registry
-pub fn cleanup_dead_connections() {
-    let dead_keys: Vec<String> = {
+/// Remove dead connections from the registry and clean up corresponding devices.
+/// Returns the IPs of removed connections so callers can act on them.
+pub fn cleanup_dead_connections() -> Vec<String> {
+    let dead_entries: Vec<(String, String)> = {
         let connections = CONNECTIONS.read();
         connections
             .iter()
             .filter(|(_, conn)| !conn.is_alive())
-            .map(|(key, _)| key.clone())
+            .map(|(key, conn)| {
+                let ip = conn.remote_addr().ip().to_string();
+                (key.clone(), ip)
+            })
             .collect()
     };
 
-    if !dead_keys.is_empty() {
+    if dead_entries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut dead_ips = Vec::new();
+    {
         let mut connections = CONNECTIONS.write();
-        for key in &dead_keys {
-            log::info!("Removing dead connection: {}", key);
+        for (key, ip) in &dead_entries {
+            log::info!("Removing dead connection: {} (ip={})", key, ip);
             connections.remove(key);
+            if !dead_ips.contains(ip) {
+                dead_ips.push(ip.clone());
+            }
         }
     }
+
+    // Remove devices whose IP matches a dead connection and emit events
+    {
+        use super::discovery;
+        let devices = discovery::get_devices();
+        for device in &devices {
+            if dead_ips.contains(&device.ip) {
+                log::info!("Removing device '{}' (ip={}) due to dead connection", device.name, device.ip);
+                discovery::remove_device(&device.id);
+
+                // Notify frontend
+                if let Some(app) = crate::APP_HANDLE.get() {
+                    use tauri::Emitter;
+                    let _ = app.emit("device-removed", &device.id);
+                }
+            }
+        }
+    }
+
+    dead_ips
 }
 
 /// Remove connection by IP address (matches ip:port keys)

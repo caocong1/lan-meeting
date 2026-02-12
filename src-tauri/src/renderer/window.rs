@@ -294,6 +294,8 @@ impl RenderWindow {
             let mut current_format = FrameFormat::BGRA;
             let mut check_counter: u32 = 0;
             let mut render_frame_count: u32 = 0;
+            let mut last_surface_w: u32 = width;
+            let mut last_surface_h: u32 = height;
 
             // Simple render loop (no winit event loop needed)
             loop {
@@ -325,6 +327,34 @@ impl RenderWindow {
                             is_open.store(false, Ordering::Relaxed);
                             break;
                         }
+                    }
+                }
+
+                // Detect window resize by querying NSView backing size
+                if has_new_frame {
+                    let (pixel_w, pixel_h) = unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+
+                        let view = ns_view_addr as *mut AnyObject;
+                        let window_ptr = ns_window_addr as *mut AnyObject;
+
+                        // Get logical bounds of the view
+                        let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
+                        // Get backing scale factor (Retina)
+                        let scale: f64 = msg_send![window_ptr, backingScaleFactor];
+
+                        let pw = (bounds.size.width * scale) as u32;
+                        let ph = (bounds.size.height * scale) as u32;
+                        (pw.max(1), ph.max(1))
+                    };
+
+                    if pixel_w != last_surface_w || pixel_h != last_surface_h {
+                        log::info!("Render thread: window resized {}x{} -> {}x{}",
+                            last_surface_w, last_surface_h, pixel_w, pixel_h);
+                        renderer.resize(pixel_w, pixel_h);
+                        last_surface_w = pixel_w;
+                        last_surface_h = pixel_h;
                     }
                 }
 

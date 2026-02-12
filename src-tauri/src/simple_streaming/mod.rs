@@ -7,6 +7,7 @@
 use crate::capture::{self, ScreenCapture};
 use crate::decoder::software::SoftwareDecoder;
 use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
+use crate::encoder::scaler::FrameScaler;
 use crate::encoder::software::SoftwareEncoder;
 use crate::encoder::{EncoderConfig, EncoderPreset, VideoEncoder};
 use crate::network::quic::{self, QuicStream};
@@ -24,6 +25,10 @@ const MSG_TYPE_STOP: u8 = 0x03;
 
 /// Hardcoded FPS for simplicity
 const SIMPLE_FPS: u32 = 10;
+
+/// Target encode resolution (downscale from capture resolution)
+const SIMPLE_TARGET_WIDTH: u32 = 1280;
+const SIMPLE_TARGET_HEIGHT: u32 = 720;
 
 // ===== Global state =====
 
@@ -73,15 +78,21 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
         .map_err(|e| format!("[SIMPLE] Failed to start capture: {}", e))?;
     log::info!("[SIMPLE] Capture started");
 
-    // Create encoder
+    // Create pre-encoder downscaler: capture resolution → target resolution
+    let pre_scaler = FrameScaler::new_with_target(width, height, SIMPLE_TARGET_WIDTH, SIMPLE_TARGET_HEIGHT);
+    let encode_width = pre_scaler.dst_width;
+    let encode_height = pre_scaler.dst_height;
+    log::info!("[SIMPLE] Pre-scaler: {}x{} -> {}x{}", width, height, encode_width, encode_height);
+
+    // Create encoder with downscaled dimensions
     let mut encoder = SoftwareEncoder::new()
         .map_err(|e| format!("[SIMPLE] Failed to create encoder: {}", e))?;
 
     let encoder_config = EncoderConfig {
-        width,
-        height,
+        width: encode_width,
+        height: encode_height,
         fps: SIMPLE_FPS,
-        bitrate: 2_000_000, // 2 Mbps - conservative
+        bitrate: 2_000_000, // 2 Mbps
         max_bitrate: 4_000_000,
         keyframe_interval: SIMPLE_FPS, // 1 keyframe per second
         preset: EncoderPreset::UltraFast,
@@ -90,8 +101,7 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
     encoder.init(encoder_config)
         .map_err(|e| format!("[SIMPLE] Failed to init encoder: {}", e))?;
 
-    let (encode_width, encode_height) = encoder.get_dimensions().unwrap_or((width, height));
-    log::info!("[SIMPLE] Encoder initialized: {}x{} (encode: {}x{}) @ {} fps",
+    log::info!("[SIMPLE] Encoder initialized: {}x{} -> {}x{} @ {} fps",
         width, height, encode_width, encode_height, SIMPLE_FPS);
 
     // Create stop channel
@@ -111,6 +121,7 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
             let mut state = SHARER_STATE.write();
             *state = Some(SharerState {
                 capture,
+                pre_scaler,
                 encoder,
                 encode_width,
                 encode_height,
@@ -126,6 +137,7 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
 /// Internal sharer state
 struct SharerState {
     capture: Box<dyn ScreenCapture>,
+    pre_scaler: FrameScaler,
     encoder: SoftwareEncoder,
     encode_width: u32,
     encode_height: u32,
@@ -204,7 +216,7 @@ pub async fn handle_viewer_request(peer_ip: &str) {
         }
         last_frame_time = std::time::Instant::now();
 
-        // Capture + encode in block_in_place to avoid blocking tokio worker
+        // Capture + scale + encode in block_in_place to avoid blocking tokio worker
         let capture_result = tokio::task::block_in_place(|| {
             let frame = match state.capture.capture_frame() {
                 Ok(f) => f,
@@ -213,12 +225,15 @@ pub async fn handle_viewer_request(peer_ip: &str) {
                 }
             };
 
+            // Downscale before encoding (e.g. 3456x2160 → 1280x720)
+            let scaled_data = state.pre_scaler.scale(&frame.data);
+
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
 
-            let encoded = match state.encoder.encode(&frame.data, timestamp) {
+            let encoded = match state.encoder.encode(&scaled_data, timestamp) {
                 Ok(e) => e,
                 Err(e) => {
                     return Err(format!("Encode: {}", e));

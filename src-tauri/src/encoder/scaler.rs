@@ -1,14 +1,14 @@
-//! Frame scaler for adapting BGRA frames when resolution exceeds encoder limits
+//! Frame scaler for adapting BGRA frames to target encoder dimensions
 //!
-//! OpenH264 has a maximum resolution of 3840x2160 (4K UHD).
-//! This module uses fast cropping to fit oversized frames within limits.
-//! Cropping removes edge pixels rather than expensive per-pixel scaling.
+//! Supports two modes:
+//! 1. Cropping: fast edge removal when dimensions slightly exceed OpenH264 limits
+//! 2. Downscaling: nearest-neighbor resize for significant resolution reduction
 
 /// Maximum dimensions supported by OpenH264
 pub const OPENH264_MAX_WIDTH: u32 = 3840;
 pub const OPENH264_MAX_HEIGHT: u32 = 2160;
 
-/// How the frame is adapted to fit encoder limits
+/// How the frame is adapted
 #[derive(Debug, Clone, Copy)]
 enum AdaptMode {
     /// No adaptation needed
@@ -19,6 +19,8 @@ enum AdaptMode {
     CropWidth,
     /// Crop both rows and columns
     CropBoth,
+    /// Nearest-neighbor downscale
+    Downscale,
 }
 
 /// Frame scaler for BGRA frames
@@ -43,26 +45,23 @@ impl FrameScaler {
         let height_exceeds = src_height > OPENH264_MAX_HEIGHT;
 
         let (dst_width, dst_height, mode) = match (width_exceeds, height_exceeds) {
-            (false, false) => (src_width, src_height, AdaptMode::None),
+            (false, false) => (src_width & !1, src_height & !1, AdaptMode::None),
             (false, true) => {
-                // Only height exceeds - crop to max height, keep even
                 let h = OPENH264_MAX_HEIGHT & !1;
-                (src_width, h, AdaptMode::CropHeight)
+                (src_width & !1, h, AdaptMode::CropHeight)
             }
             (true, false) => {
-                // Only width exceeds - crop to max width, keep even
                 let w = OPENH264_MAX_WIDTH & !1;
-                (w, src_height, AdaptMode::CropWidth)
+                (w, src_height & !1, AdaptMode::CropWidth)
             }
             (true, true) => {
-                // Both exceed - crop both
                 let w = OPENH264_MAX_WIDTH & !1;
                 let h = OPENH264_MAX_HEIGHT & !1;
                 (w, h, AdaptMode::CropBoth)
             }
         };
 
-        let needs_scaling = !matches!(mode, AdaptMode::None);
+        let needs_scaling = dst_width != src_width || dst_height != src_height;
 
         if needs_scaling {
             log::info!(
@@ -81,27 +80,58 @@ impl FrameScaler {
         }
     }
 
-    /// Adapt a BGRA frame to fit within encoder limits.
-    /// Returns cropped frame data, or the original slice if no adaptation needed.
+    /// Create a scaler that downscales to a target resolution.
+    /// Target dimensions are clamped to even numbers and to OpenH264 limits.
+    /// If source is already smaller than or equal to target, no scaling is done.
+    pub fn new_with_target(src_width: u32, src_height: u32, target_width: u32, target_height: u32) -> Self {
+        // Ensure even dimensions and within limits
+        let dst_width = target_width.min(src_width).min(OPENH264_MAX_WIDTH) & !1;
+        let dst_height = target_height.min(src_height).min(OPENH264_MAX_HEIGHT) & !1;
+
+        let needs_scaling = dst_width != src_width || dst_height != src_height;
+        let mode = if needs_scaling {
+            AdaptMode::Downscale
+        } else {
+            AdaptMode::None
+        };
+
+        if needs_scaling {
+            log::info!(
+                "Frame scaler initialized: {}x{} -> {}x{} (downscale)",
+                src_width, src_height, dst_width, dst_height
+            );
+        }
+
+        Self {
+            src_width,
+            src_height,
+            dst_width,
+            dst_height,
+            needs_scaling,
+            mode,
+        }
+    }
+
+    /// Adapt a BGRA frame to fit target dimensions.
+    /// Returns scaled/cropped frame data, or the original slice if no adaptation needed.
     pub fn scale<'a>(&self, bgra: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
         match self.mode {
             AdaptMode::None => {
-                // No adaptation needed - return reference, zero cost
                 std::borrow::Cow::Borrowed(bgra)
             }
             AdaptMode::CropHeight => {
-                // Just take fewer rows - single slice operation
                 let row_bytes = self.src_width as usize * 4;
                 let total = row_bytes * self.dst_height as usize;
                 std::borrow::Cow::Borrowed(&bgra[..total])
             }
             AdaptMode::CropWidth => {
-                // Need to copy each row with fewer pixels
                 self.crop_width(bgra)
             }
             AdaptMode::CropBoth => {
-                // Crop both dimensions
                 self.crop_both(bgra)
+            }
+            AdaptMode::Downscale => {
+                std::borrow::Cow::Owned(self.downscale_nearest(bgra))
             }
         }
     }
@@ -137,6 +167,31 @@ impl FrameScaler {
 
         std::borrow::Cow::Owned(dst)
     }
+
+    /// Nearest-neighbor downscale for BGRA frames
+    fn downscale_nearest(&self, src: &[u8]) -> Vec<u8> {
+        let sw = self.src_width as usize;
+        let sh = self.src_height as usize;
+        let dw = self.dst_width as usize;
+        let dh = self.dst_height as usize;
+        let src_stride = sw * 4;
+        let dst_stride = dw * 4;
+        let mut dst = vec![0u8; dst_stride * dh];
+
+        for dy in 0..dh {
+            let sy = dy * sh / dh;
+            let src_row = sy * src_stride;
+            let dst_row = dy * dst_stride;
+            for dx in 0..dw {
+                let sx = dx * sw / dw;
+                let si = src_row + sx * 4;
+                let di = dst_row + dx * 4;
+                dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
+            }
+        }
+
+        dst
+    }
 }
 
 #[cfg(test)]
@@ -153,16 +208,14 @@ mod tests {
 
     #[test]
     fn test_crop_height_only() {
-        // 3456x2168 exceeds 2160 height limit
         let scaler = FrameScaler::new(3456, 2168);
         assert!(scaler.needs_scaling);
-        assert_eq!(scaler.dst_width, 3456); // Width unchanged
-        assert_eq!(scaler.dst_height, 2160); // Height cropped to limit
+        assert_eq!(scaler.dst_width, 3456);
+        assert_eq!(scaler.dst_height, 2160);
     }
 
     #[test]
     fn test_crop_width_only() {
-        // 4096x2160 exceeds 3840 width limit
         let scaler = FrameScaler::new(4096, 2160);
         assert!(scaler.needs_scaling);
         assert_eq!(scaler.dst_width, 3840);
@@ -186,10 +239,6 @@ mod tests {
 
     #[test]
     fn test_crop_height_zero_cost() {
-        // For height-only crop, the returned data should be a borrowed slice
-        let scaler = FrameScaler::new(4, 6);
-        // Create fake 4x6 BGRA frame (4 * 6 * 4 = 96 bytes)
-        // Limit doesn't apply here, but let's test with a scaler that crops height
         let scaler = FrameScaler {
             src_width: 4,
             src_height: 6,
@@ -202,5 +251,51 @@ mod tests {
         let result = scaler.scale(&frame);
         assert!(matches!(result, std::borrow::Cow::Borrowed(_)));
         assert_eq!(result.len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn test_downscale_target() {
+        let scaler = FrameScaler::new_with_target(3456, 2160, 1280, 720);
+        assert!(scaler.needs_scaling);
+        assert_eq!(scaler.dst_width, 1280);
+        assert_eq!(scaler.dst_height, 720);
+    }
+
+    #[test]
+    fn test_downscale_no_upscale() {
+        // Target larger than source - should not upscale
+        let scaler = FrameScaler::new_with_target(640, 480, 1280, 720);
+        assert!(!scaler.needs_scaling);
+        assert_eq!(scaler.dst_width, 640);
+        assert_eq!(scaler.dst_height, 480);
+    }
+
+    #[test]
+    fn test_downscale_even_dimensions() {
+        let scaler = FrameScaler::new_with_target(3456, 2160, 1281, 721);
+        assert_eq!(scaler.dst_width % 2, 0);
+        assert_eq!(scaler.dst_height % 2, 0);
+    }
+
+    #[test]
+    fn test_downscale_nearest_pixel_values() {
+        let scaler = FrameScaler::new_with_target(4, 4, 2, 2);
+        // 4x4 BGRA frame: pixel (0,0)=red, (1,0)=green, (0,1)=blue, (1,1)=white
+        let mut src = vec![0u8; 4 * 4 * 4];
+        // Row 0: red, green, red, green
+        src[0..4].copy_from_slice(&[0, 0, 255, 255]); // BGRA red
+        src[4..8].copy_from_slice(&[0, 255, 0, 255]); // BGRA green
+        // Row 2: blue, white, blue, white
+        let row2 = 2 * 4 * 4;
+        src[row2..row2 + 4].copy_from_slice(&[255, 0, 0, 255]); // BGRA blue
+        src[row2 + 4..row2 + 8].copy_from_slice(&[255, 255, 255, 255]); // BGRA white
+
+        let result = scaler.scale(&src);
+        assert_eq!(result.len(), 2 * 2 * 4);
+        // (0,0) maps to src (0,0) = red
+        assert_eq!(&result[0..4], &[0, 0, 255, 255]);
+        // (1,0) maps to src (2,0) = red (same as 0,0 in our pattern)
+        // (0,1) maps to src (0,2) = blue
+        assert_eq!(&result[8..12], &[255, 0, 0, 255]);
     }
 }

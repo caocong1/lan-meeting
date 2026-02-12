@@ -127,6 +127,8 @@ pub fn request_screen_permission() -> bool {
 /// Get discovered devices on the network
 #[tauri::command]
 pub async fn get_devices() -> Result<Vec<DiscoveredDevice>, String> {
+    // Clean up dead connections and their devices before returning
+    crate::network::quic::cleanup_dead_connections();
     Ok(discovery::get_devices())
 }
 

@@ -921,6 +921,28 @@ impl WgpuRenderer {
                 multiview_mask: None,
             });
 
+            // Set viewport to maintain video aspect ratio (letterbox/pillarbox)
+            if let Some(ref config) = self.surface_config {
+                if self.frame_width > 0 && self.frame_height > 0 {
+                    let surface_w = config.width as f32;
+                    let surface_h = config.height as f32;
+                    let frame_aspect = self.frame_width as f32 / self.frame_height as f32;
+                    let surface_aspect = surface_w / surface_h;
+
+                    let (vp_x, vp_y, vp_w, vp_h) = if frame_aspect > surface_aspect {
+                        // Video wider than window - fit width, letterbox top/bottom
+                        let h = surface_w / frame_aspect;
+                        (0.0, (surface_h - h) / 2.0, surface_w, h)
+                    } else {
+                        // Video taller than window - fit height, pillarbox left/right
+                        let w = surface_h * frame_aspect;
+                        ((surface_w - w) / 2.0, 0.0, w, surface_h)
+                    };
+
+                    render_pass.set_viewport(vp_x, vp_y, vp_w, vp_h, 0.0, 1.0);
+                }
+            }
+
             match format {
                 FrameFormat::BGRA => {
                     if let Some(ref bind_group) = self.bgra_bind_group {

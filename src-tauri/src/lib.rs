@@ -171,6 +171,22 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
             }
         }
     }
+
+    // Connection ended - clean up the device associated with this peer
+    let peer_ip = conn.remote_addr().ip().to_string();
+    log::info!("Peer disconnected: {}, cleaning up device", peer_ip);
+    let devices = network::discovery::get_devices();
+    for device in &devices {
+        if device.ip == peer_ip {
+            log::info!("Removing disconnected device '{}' (ip={})", device.name, device.ip);
+            network::discovery::remove_device(&device.id);
+            if let Some(app) = APP_HANDLE.get() {
+                let _ = app.emit("device-removed", &device.id);
+            }
+        }
+    }
+    // Also clean up the QUIC connection entry
+    network::quic::remove_connection_by_ip(&peer_ip);
 }
 
 /// Handle a protocol message
