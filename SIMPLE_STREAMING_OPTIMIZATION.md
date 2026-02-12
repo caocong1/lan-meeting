@@ -98,19 +98,24 @@ Render thread: frame N received and uploaded (1280x720, YUV420)
 
 **问题**: `bgra_to_yuv420` 是逐像素循环, 对 1280x720 仍有一定开销
 
-**方案**: 按行批量处理, 优化缓存命中率; 或用 rayon 并行转换多行
+**方案**: 两遍法 + 预计算索引表
+- Pass 1: Y 平面逐行连续写入 (无分支)
+- Pass 2: UV 平面直接按 2x2 块遍历 (无 % 检查)
+- scaler downscale_nearest 预计算 X 偏移表避免逐像素除法
 
 **改动文件**:
-- `src-tauri/src/encoder/software.rs` - 优化转换函数
+- `src-tauri/src/encoder/software.rs` - 两遍法优化 bgra_to_yuv420
+- `src-tauri/src/encoder/scaler.rs` - downscale_nearest 预计算 X 偏移
+- `src-tauri/src/simple_streaming/mod.rs` - 添加逐帧计时日志
 
 **预期日志**:
 ```
-[SIMPLE] Frame N encode time: ~Xms  (添加计时日志)
+[SIMPLE] Frame N timing: capture=Xms scale=Xms encode=Xms total=Xms
 ```
 
 **预期效果**: 编码端 CPU 占用降低 30-50%
 
-**状态**: [ ] 未开始
+**状态**: [x] 已完成
 
 ---
 

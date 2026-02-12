@@ -218,15 +218,19 @@ pub async fn handle_viewer_request(peer_ip: &str) {
 
         // Capture + scale + encode in block_in_place to avoid blocking tokio worker
         let capture_result = tokio::task::block_in_place(|| {
+            let t0 = std::time::Instant::now();
+
             let frame = match state.capture.capture_frame() {
                 Ok(f) => f,
                 Err(e) => {
                     return Err(format!("Capture: {}", e));
                 }
             };
+            let t_capture = t0.elapsed();
 
             // Downscale before encoding (e.g. 3456x2160 → 1280x720)
             let scaled_data = state.pre_scaler.scale(&frame.data);
+            let t_scale = t0.elapsed();
 
             let timestamp = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -239,6 +243,17 @@ pub async fn handle_viewer_request(peer_ip: &str) {
                     return Err(format!("Encode: {}", e));
                 }
             };
+            let t_encode = t0.elapsed();
+
+            if sequence < 10 || sequence % 50 == 0 {
+                log::info!("[SIMPLE] Frame {} timing: capture={:.1}ms scale={:.1}ms encode={:.1}ms total={:.1}ms",
+                    sequence,
+                    t_capture.as_secs_f64() * 1000.0,
+                    (t_scale - t_capture).as_secs_f64() * 1000.0,
+                    (t_encode - t_scale).as_secs_f64() * 1000.0,
+                    t_encode.as_secs_f64() * 1000.0,
+                );
+            }
 
             Ok((timestamp, encoded))
         });

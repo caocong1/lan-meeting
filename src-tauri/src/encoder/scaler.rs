@@ -175,7 +175,8 @@ impl FrameScaler {
         std::borrow::Cow::Owned(dst)
     }
 
-    /// Nearest-neighbor downscale for BGRA frames
+    /// Nearest-neighbor downscale for BGRA frames.
+    /// Precomputes X source offsets to avoid per-pixel division.
     fn downscale_nearest(&self, src: &[u8]) -> Vec<u8> {
         let sw = self.src_width as usize;
         let sh = self.src_height as usize;
@@ -185,13 +186,15 @@ impl FrameScaler {
         let dst_stride = dw * 4;
         let mut dst = vec![0u8; dst_stride * dh];
 
+        // Precompute source X byte offsets for each destination column
+        let x_offsets: Vec<usize> = (0..dw).map(|dx| (dx * sw / dw) * 4).collect();
+
         for dy in 0..dh {
             let sy = dy * sh / dh;
             let src_row = sy * src_stride;
             let dst_row = dy * dst_stride;
-            for dx in 0..dw {
-                let sx = dx * sw / dw;
-                let si = src_row + sx * 4;
+            for (dx, &sx_off) in x_offsets.iter().enumerate() {
+                let si = src_row + sx_off;
                 let di = dst_row + dx * 4;
                 dst[di..di + 4].copy_from_slice(&src[si..si + 4]);
             }
