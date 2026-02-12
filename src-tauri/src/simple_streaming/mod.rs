@@ -24,7 +24,7 @@ const MSG_TYPE_FRAME: u8 = 0x02;
 const MSG_TYPE_STOP: u8 = 0x03;
 
 /// Hardcoded FPS for simplicity
-const SIMPLE_FPS: u32 = 10;
+const SIMPLE_FPS: u32 = 30;
 
 /// Target encode resolution (downscale from capture resolution)
 const SIMPLE_TARGET_WIDTH: u32 = 1280;
@@ -345,14 +345,14 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                 let config = DecoderConfig {
                     width,
                     height,
-                    output_format: OutputFormat::BGRA,
+                    output_format: OutputFormat::YUV420,
                 };
 
                 if let Err(e) = dec.init(config) {
                     log::error!("[SIMPLE] Failed to init decoder: {}", e);
                     break;
                 }
-                log::info!("[SIMPLE] Decoder initialized (OpenH264 software)");
+                log::info!("[SIMPLE] Decoder initialized (OpenH264 software, output=YUV420)");
 
                 // Create render window
                 let title = format!("[Simple] {} screen", peer_ip);
@@ -439,10 +439,16 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                             // Only render the latest frame
                             if is_last {
                                 if let Some(cpu_data) = decoded.cpu_data() {
-                                    let render_frame = RenderFrame::from_bgra(
+                                    let strides = decoded.strides().unwrap_or([
+                                        decoded.width as usize,
+                                        decoded.width as usize / 2,
+                                        decoded.width as usize / 2,
+                                    ]);
+                                    let render_frame = RenderFrame::from_yuv420(
                                         decoded.width,
                                         decoded.height,
                                         cpu_data.to_vec(),
+                                        strides,
                                     );
                                     if let Some(ref handle) = window_handle {
                                         if let Err(e) = handle.render_frame(render_frame) {

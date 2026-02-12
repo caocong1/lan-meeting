@@ -1,6 +1,6 @@
 # Simple Streaming 优化计划
 
-**当前状态**: 3456x2160 原始分辨率, 10 FPS, 2 Mbps, 全软件编解码, ~8秒延迟
+**当前状态**: 3456x2160→1152x720 缩放, 10 FPS, 2 Mbps, 全软件编解码, ~2-3秒延迟
 
 ---
 
@@ -69,7 +69,7 @@ Render thread: frame N received and uploaded (1280x720, YUV420)
 
 **预期效果**: 接收端 CPU 占用显著降低, 解码+渲染更快
 
-**状态**: [ ] 未开始
+**状态**: [x] 已完成
 
 ---
 
@@ -90,7 +90,7 @@ Render thread: frame N received and uploaded (1280x720, YUV420)
 
 **预期效果**: 明显更流畅, 延迟保持在 1-2秒内
 
-**状态**: [ ] 未开始
+**状态**: [x] 已完成
 
 ---
 
