@@ -305,20 +305,16 @@ impl RenderWindow {
 
                 let mut has_new_frame = false;
 
-                // Process all pending commands
+                // Process all pending commands - only keep the latest frame
+                let mut latest_frame: Option<RenderFrame> = None;
+                let mut stale_count: u32 = 0;
                 while let Ok(cmd) = command_rx.try_recv() {
                     match cmd {
                         WindowCommand::RenderFrame(frame) => {
-                            current_format = frame.format;
-                            if let Err(e) = renderer.upload_frame(&frame) {
-                                log::error!("Render thread: Failed to upload frame: {}", e);
+                            if latest_frame.is_some() {
+                                stale_count += 1;
                             }
-                            has_new_frame = true;
-                            render_frame_count += 1;
-                            if render_frame_count <= 5 || render_frame_count % 50 == 0 {
-                                log::info!("Render thread: frame {} received and uploaded ({}x{}, {:?})",
-                                    render_frame_count, frame.width, frame.height, frame.format);
-                            }
+                            latest_frame = Some(frame);
                         }
                         WindowCommand::SetTitle(_title) => {
                             // TODO: dispatch to main thread to update NSWindow title
@@ -327,6 +323,24 @@ impl RenderWindow {
                             is_open.store(false, Ordering::Relaxed);
                             break;
                         }
+                    }
+                }
+
+                // Upload only the latest frame, skip stale ones
+                if let Some(frame) = latest_frame {
+                    current_format = frame.format;
+                    render_frame_count += 1;
+                    if stale_count > 0 {
+                        log::info!("Render thread: dropped {} stale frames, rendering frame {}",
+                            stale_count, render_frame_count);
+                    }
+                    if let Err(e) = renderer.upload_frame(&frame) {
+                        log::error!("Render thread: Failed to upload frame: {}", e);
+                    }
+                    has_new_frame = true;
+                    if render_frame_count <= 5 || render_frame_count % 50 == 0 {
+                        log::info!("Render thread: frame {} uploaded ({}x{}, {:?})",
+                            render_frame_count, frame.width, frame.height, frame.format);
                     }
                 }
 

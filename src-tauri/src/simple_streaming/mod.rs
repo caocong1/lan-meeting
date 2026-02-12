@@ -372,24 +372,27 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
             }
 
             MSG_TYPE_FRAME => {
-                if data.len() < 13 {
-                    log::warn!("[SIMPLE] Frame message too short: {} bytes", data.len());
-                    continue;
+                // Collect this frame + drain any pending frames from the stream
+                let mut pending_frames = vec![data];
+                loop {
+                    match tokio::time::timeout(Duration::ZERO, stream.recv_framed()).await {
+                        Ok(Ok(next)) if !next.is_empty() && next[0] == MSG_TYPE_FRAME => {
+                            pending_frames.push(next);
+                        }
+                        Ok(Ok(next)) if !next.is_empty() && next[0] == MSG_TYPE_STOP => {
+                            log::info!("[SIMPLE] Received Stop message from {}", peer_ip);
+                            // Process remaining frames then exit
+                            pending_frames.push(next);
+                            break;
+                        }
+                        _ => break,
+                    }
                 }
 
-                let timestamp = u64::from_be_bytes([
-                    data[1], data[2], data[3], data[4],
-                    data[5], data[6], data[7], data[8],
-                ]);
-                let frame_len = u32::from_be_bytes([data[9], data[10], data[11], data[12]]) as usize;
-
-                if data.len() < 13 + frame_len {
-                    log::warn!("[SIMPLE] Frame data truncated: expected {} bytes, got {}",
-                        13 + frame_len, data.len());
-                    continue;
+                let skipped = if pending_frames.len() > 1 { pending_frames.len() - 1 } else { 0 };
+                if skipped > 0 {
+                    log::info!("[SIMPLE] Skipped {} stale frames, processing latest", skipped);
                 }
-
-                let frame_data = &data[13..13 + frame_len];
 
                 // Check window is still open
                 if let Some(ref handle) = window_handle {
@@ -402,47 +405,74 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                     continue;
                 }
 
-                // Decode
                 let Some(ref mut dec) = decoder else {
                     log::warn!("[SIMPLE] Frame received but no decoder (missing ScreenStart?)");
                     continue;
                 };
 
-                match dec.decode(frame_data, timestamp) {
-                    Ok(Some(decoded)) => {
-                        // Convert to render frame
-                        if let Some(cpu_data) = decoded.cpu_data() {
-                            let render_frame = RenderFrame::from_bgra(
-                                decoded.width,
-                                decoded.height,
-                                cpu_data.to_vec(),
-                            );
+                // Decode ALL frames (H.264 P-frames need sequential decode), render only the last
+                for (i, fdata) in pending_frames.iter().enumerate() {
+                    if fdata[0] == MSG_TYPE_STOP {
+                        break;
+                    }
+                    if fdata.len() < 13 {
+                        continue;
+                    }
 
-                            if let Some(ref handle) = window_handle {
-                                if let Err(e) = handle.render_frame(render_frame) {
-                                    if frame_count % 100 == 0 {
-                                        log::warn!("[SIMPLE] Render error: {}", e);
+                    let timestamp = u64::from_be_bytes([
+                        fdata[1], fdata[2], fdata[3], fdata[4],
+                        fdata[5], fdata[6], fdata[7], fdata[8],
+                    ]);
+                    let frame_len = u32::from_be_bytes([fdata[9], fdata[10], fdata[11], fdata[12]]) as usize;
+
+                    if fdata.len() < 13 + frame_len {
+                        continue;
+                    }
+
+                    let encoded_data = &fdata[13..13 + frame_len];
+                    let is_last = i == pending_frames.len() - 1
+                        || (i + 1 < pending_frames.len() && pending_frames[i + 1][0] == MSG_TYPE_STOP);
+
+                    match dec.decode(encoded_data, timestamp) {
+                        Ok(Some(decoded)) => {
+                            frame_count += 1;
+                            // Only render the latest frame
+                            if is_last {
+                                if let Some(cpu_data) = decoded.cpu_data() {
+                                    let render_frame = RenderFrame::from_bgra(
+                                        decoded.width,
+                                        decoded.height,
+                                        cpu_data.to_vec(),
+                                    );
+                                    if let Some(ref handle) = window_handle {
+                                        if let Err(e) = handle.render_frame(render_frame) {
+                                            if frame_count % 100 == 0 {
+                                                log::warn!("[SIMPLE] Render error: {}", e);
+                                            }
+                                        }
                                     }
+                                }
+                                if frame_count == 1 || frame_count % 50 == 0 {
+                                    log::info!("[SIMPLE] Frame {} decoded and rendered", frame_count);
                                 }
                             }
                         }
+                        Ok(None) => {
+                            if frame_count == 0 {
+                                log::debug!("[SIMPLE] Decoder buffering (no output yet)");
+                            }
+                        }
+                        Err(e) => {
+                            if frame_count % 100 == 0 {
+                                log::warn!("[SIMPLE] Decode error at frame {}: {}", frame_count, e);
+                            }
+                        }
+                    }
+                }
 
-                        frame_count += 1;
-                        if frame_count == 1 || frame_count % 50 == 0 {
-                            log::info!("[SIMPLE] Frame {} decoded and rendered", frame_count);
-                        }
-                    }
-                    Ok(None) => {
-                        // Decoder buffering, no output yet
-                        if frame_count == 0 {
-                            log::debug!("[SIMPLE] Decoder buffering (no output yet)");
-                        }
-                    }
-                    Err(e) => {
-                        if frame_count % 100 == 0 {
-                            log::warn!("[SIMPLE] Decode error at frame {}: {}", frame_count, e);
-                        }
-                    }
+                // If we drained a STOP message, exit
+                if pending_frames.last().map(|f| f[0]) == Some(MSG_TYPE_STOP) {
+                    break;
                 }
             }
 
