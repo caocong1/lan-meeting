@@ -44,7 +44,16 @@ static OUR_DEVICE_ID: once_cell::sync::Lazy<String> =
 
 /// mDNS service daemon handle
 static MDNS_DAEMON: once_cell::sync::Lazy<Option<ServiceDaemon>> =
-    once_cell::sync::Lazy::new(|| ServiceDaemon::new().ok());
+    once_cell::sync::Lazy::new(|| match ServiceDaemon::new() {
+        Ok(daemon) => {
+            log::info!("mDNS daemon created successfully");
+            Some(daemon)
+        }
+        Err(e) => {
+            log::error!("Failed to create mDNS daemon: {}", e);
+            None
+        }
+    });
 
 /// Get our device ID
 pub fn get_our_device_id() -> &'static str {
@@ -97,15 +106,36 @@ fn register_service(daemon: &ServiceDaemon) -> Result<(), NetworkError> {
     properties.insert("name".to_string(), hostname.clone());
     properties.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
 
+    // Collect our real LAN IPs to register with mDNS
+    let lan_ips: Vec<String> = if_addrs::get_if_addrs()
+        .unwrap_or_default()
+        .iter()
+        .filter(|iface| !iface.is_loopback())
+        .filter(|iface| iface.ip().is_ipv4())
+        .filter(|iface| crate::commands::is_real_lan_ip(&iface.ip()))
+        .map(|iface| iface.ip().to_string())
+        .collect();
+
+    let ip_str = if lan_ips.is_empty() {
+        log::warn!("No real LAN IPs found, using addr_auto for mDNS");
+        String::new()
+    } else {
+        log::info!("Registering mDNS with IPs: {:?}", lan_ips);
+        lan_ips.join(",")
+    };
+
     let service_info = ServiceInfo::new(
         SERVICE_TYPE,
         &instance_name,
         &format!("{}.local.", hostname),
-        "",
+        &ip_str,
         SERVICE_PORT,
         properties,
     )
-    .map_err(|e| NetworkError::DiscoveryError(format!("Failed to create service info: {}", e)))?;
+    .map_err(|e| NetworkError::DiscoveryError(format!("Failed to create service info: {}", e)))?
+    // Enable automatic address management so the service stays updated
+    // when network interfaces change (e.g., VPN connect/disconnect)
+    .enable_addr_auto();
 
     daemon
         .register(service_info)
