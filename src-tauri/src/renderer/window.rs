@@ -215,6 +215,9 @@ impl RenderWindow {
         let ns_view_addr = ns_view.0.as_ptr() as usize;
         let ns_window_addr = _ns_window.0.as_ptr() as usize;
 
+        // Read default resolution/bitrate indices from settings
+        let (default_res_idx, default_br_idx) = crate::commands::get_default_streaming_indices();
+
         // Create floating toolbar on main thread
         let (toolbar_tx, toolbar_rx) =
             std::sync::mpsc::channel::<Result<(usize, usize, usize), String>>();
@@ -222,7 +225,7 @@ impl RenderWindow {
         let content_view_addr = ns_view_addr;
         app_handle
             .run_on_main_thread(move || {
-                let result = create_toolbar(content_view_addr, width);
+                let result = create_toolbar(content_view_addr, width, default_res_idx, default_br_idx);
                 let _ = toolbar_tx.send(result);
             })
             .map_err(|e| {
@@ -236,7 +239,7 @@ impl RenderWindow {
             })?
             .map_err(|e| RendererError::WindowError(format!("Toolbar creation failed: {}", e)))?;
 
-        log::debug!("Floating toolbar created on main thread");
+        log::debug!("Floating toolbar created on main thread (res={}, br={})", default_res_idx, default_br_idx);
 
         // Create wgpu Instance + Surface on main thread
         // (Metal's get_metal_layer MUST be called on the UI thread)
@@ -321,13 +324,13 @@ impl RenderWindow {
             let mut last_surface_w: u32 = width;
             let mut last_surface_h: u32 = height;
 
-            // Toolbar state
+            // Toolbar state (initialized from settings defaults)
             let mut toolbar_visible = false;
             let mut last_mouse_x: f64 = -1.0;
             let mut last_mouse_y: f64 = -1.0;
             let mut last_mouse_move_time = std::time::Instant::now();
-            let mut last_selected_resolution: isize = 0;
-            let mut last_selected_bitrate: isize = 0;
+            let mut last_selected_resolution: isize = default_res_idx as isize;
+            let mut last_selected_bitrate: isize = default_br_idx as isize;
             let toolbar_hide_delay = std::time::Duration::from_secs(3);
 
             // Simple render loop (no winit event loop needed)
@@ -649,7 +652,7 @@ fn create_ns_window(
 /// Returns (toolbar_view_addr, resolution_popup_addr, bitrate_popup_addr) as usize.
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
-fn create_toolbar(content_view_addr: usize, _window_width: u32) -> Result<(usize, usize, usize), String> {
+fn create_toolbar(content_view_addr: usize, _window_width: u32, default_res_idx: usize, default_br_idx: usize) -> Result<(usize, usize, usize), String> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -726,7 +729,8 @@ fn create_toolbar(content_view_addr: usize, _window_width: u32) -> Result<(usize
             let ns_title = NSString::from_str(opt.label);
             let _: () = msg_send![res_popup, addItemWithTitle: &*ns_title];
         }
-        let _: () = msg_send![res_popup, selectItemAtIndex: 0isize];
+        let res_idx = (default_res_idx as isize).min(crate::simple_streaming::RESOLUTION_OPTIONS.len() as isize - 1);
+        let _: () = msg_send![res_popup, selectItemAtIndex: res_idx];
 
         // --- Bitrate dropdown (right side) ---
         let br_frame = NSRect::new(
@@ -748,7 +752,8 @@ fn create_toolbar(content_view_addr: usize, _window_width: u32) -> Result<(usize
             let ns_title = NSString::from_str(opt.label);
             let _: () = msg_send![br_popup, addItemWithTitle: &*ns_title];
         }
-        let _: () = msg_send![br_popup, selectItemAtIndex: 0isize];
+        let br_idx = (default_br_idx as isize).min(crate::simple_streaming::BITRATE_OPTIONS.len() as isize - 1);
+        let _: () = msg_send![br_popup, selectItemAtIndex: br_idx];
 
         // Add both popups to toolbar, toolbar to content view
         let _: () = msg_send![toolbar, addSubview: res_popup];

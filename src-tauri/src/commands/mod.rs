@@ -584,6 +584,12 @@ pub struct AppSettings {
     pub device_name: String,
     pub quality: String,
     pub fps: u32,
+    /// Default resolution index for viewer toolbar (0=720p, 1=1080p, 2=1440p, 3=Original)
+    #[serde(default)]
+    pub default_resolution: u32,
+    /// Default bitrate index for viewer toolbar (0=2M, 1=4M, 2=8M, 3=12M)
+    #[serde(default)]
+    pub default_bitrate: u32,
 }
 
 /// Global settings
@@ -597,6 +603,8 @@ static SETTINGS: once_cell::sync::Lazy<parking_lot::RwLock<AppSettings>> =
             device_name: hostname,
             quality: "auto".to_string(),
             fps: 30,
+            default_resolution: 1, // 1080p
+            default_bitrate: 1,    // 4 Mbps
         })
     });
 
@@ -612,6 +620,12 @@ pub fn save_settings(settings: AppSettings) -> Result<(), String> {
     log::info!("Saving settings: {:?}", settings);
     *SETTINGS.write() = settings;
     Ok(())
+}
+
+/// Get default resolution and bitrate indices for viewer toolbar
+pub fn get_default_streaming_indices() -> (usize, usize) {
+    let s = SETTINGS.read();
+    (s.default_resolution as usize, s.default_bitrate as usize)
 }
 
 // ===== Sharing status commands =====

@@ -9,6 +9,8 @@ interface AppSettings {
   device_name: string;
   quality: "auto" | "high" | "medium" | "low";
   fps: number;
+  default_resolution: number;
+  default_bitrate: number;
 }
 
 export const Settings: Component<SettingsProps> = (props) => {
@@ -16,6 +18,8 @@ export const Settings: Component<SettingsProps> = (props) => {
     device_name: "",
     quality: "auto",
     fps: 30,
+    default_resolution: 1,
+    default_bitrate: 1,
   });
   const [isSaving, setIsSaving] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
@@ -130,6 +134,42 @@ export const Settings: Component<SettingsProps> = (props) => {
               <option value="60">60 FPS (高流畅)</option>
             </select>
             <p class="text-xs text-gray-500 mt-1">更高的帧率需要更多带宽</p>
+          </div>
+
+          {/* Default Resolution */}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              默认分辨率
+            </label>
+            <select
+              value={settings().default_resolution}
+              onChange={(e) => setSettings(prev => ({ ...prev, default_resolution: parseInt(e.currentTarget.value) }))}
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+            >
+              <option value="0">720p</option>
+              <option value="1">1080p</option>
+              <option value="2">1440p</option>
+              <option value="3">Original</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">观看他人屏幕时的初始分辨率</p>
+          </div>
+
+          {/* Default Bitrate */}
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-2">
+              默认码率
+            </label>
+            <select
+              value={settings().default_bitrate}
+              onChange={(e) => setSettings(prev => ({ ...prev, default_bitrate: parseInt(e.currentTarget.value) }))}
+              class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+            >
+              <option value="0">2 Mbps</option>
+              <option value="1">4 Mbps</option>
+              <option value="2">8 Mbps</option>
+              <option value="3">12 Mbps</option>
+            </select>
+            <p class="text-xs text-gray-500 mt-1">观看他人屏幕时的初始码率</p>
           </div>
         </div>
 
