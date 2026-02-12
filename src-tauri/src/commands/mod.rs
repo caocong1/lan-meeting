@@ -309,33 +309,30 @@ pub fn is_real_lan_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-/// Get local IP address, preferring real LAN IPs over VPN interfaces
+/// Get local IP address by enumerating network interfaces.
+/// Prefers real LAN IPs (192.168/10/172.16) over VPN/proxy virtual interfaces.
 fn get_local_ip() -> Option<String> {
-    use std::net::UdpSocket;
+    let ifaces = if_addrs::get_if_addrs().ok()?;
 
-    // Try multiple targets to get IPs from different routing paths
-    let targets = ["8.8.8.8:80", "192.168.1.1:80", "10.0.0.1:80"];
-    let mut candidates = Vec::new();
+    let mut candidates: Vec<std::net::IpAddr> = ifaces
+        .iter()
+        .filter(|iface| !iface.is_loopback())
+        .map(|iface| iface.ip())
+        .filter(|ip| ip.is_ipv4())
+        .collect();
 
-    for target in &targets {
-        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
-            if socket.connect(target).is_ok() {
-                if let Ok(addr) = socket.local_addr() {
-                    let ip = addr.ip();
-                    if !ip.is_loopback() && !candidates.contains(&ip) {
-                        candidates.push(ip);
-                    }
-                }
-            }
-        }
-    }
+    // Deduplicate
+    candidates.sort_by_key(|ip| ip.to_string());
+    candidates.dedup();
+
+    log::debug!("Network interface IPs: {:?}", candidates);
 
     // Prefer real LAN IPs over VPN IPs
     if let Some(lan_ip) = candidates.iter().find(|ip| is_real_lan_ip(ip)) {
         return Some(lan_ip.to_string());
     }
 
-    // Fall back to any non-loopback IP
+    // Fall back to any non-loopback IPv4
     candidates.first().map(|ip| ip.to_string())
 }
 
