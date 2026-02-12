@@ -1,6 +1,6 @@
 # Simple Streaming 优化计划
 
-**当前状态**: 3456x2160→1152x720 缩放, 10 FPS, 2 Mbps, 全软件编解码, ~2-3秒延迟
+**当前状态**: 3456x2160→1152x720 缩放, 30 FPS, 2 Mbps, 硬件编码+软件解码, GPU YUV→RGB, QUIC 优化
 
 ---
 
@@ -146,13 +146,17 @@ Render thread: frame N received and uploaded (1280x720, YUV420)
 
 ## Step 7: 调优 QUIC 传输参数
 
-**问题**: QUIC 默认拥塞控制和缓冲可能引入额外延迟
+**问题**: quinn 默认 initial_rtt=333ms (为互联网设计), 局域网只有 <1ms, 导致拥塞控制启动慢
 
-**方案**: 减小发送/接收缓冲区, 配置拥塞控制偏好低延迟
+**方案**:
+- `initial_rtt(5ms)` — 局域网 RTT 估计, 让拥塞控制器更快达到稳态
+- `stream_receive_window(1MB)` — 限制单流缓冲避免延迟堆积
+- `receive_window(2MB)` — 连接级接收窗口
+- `send_window(2MB)` — 发送窗口允许突发数据 (关键帧)
 
 **改动文件**:
-- `src-tauri/src/network/quic.rs` - 传输配置参数
+- `src-tauri/src/network/quic.rs` - TransportConfig 参数调优
 
-**预期效果**: 传输延迟降低 50-100ms
+**预期效果**: 首帧传输更快, 拥塞控制更激进, 传输延迟降低
 
-**状态**: [ ] 未开始
+**状态**: [x] 已完成

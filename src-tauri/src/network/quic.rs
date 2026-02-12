@@ -95,13 +95,27 @@ impl QuicEndpoint {
     }
 
     /// Create shared transport configuration for both server and client
+    /// Tuned for low-latency LAN video streaming
     fn create_transport_config() -> quinn::TransportConfig {
         let mut transport = quinn::TransportConfig::default();
         transport.max_idle_timeout(Some(Duration::from_secs(30).try_into().unwrap()));
         transport.keep_alive_interval(Some(Duration::from_secs(5)));
+
+        // LAN RTT is typically <1ms; default 333ms makes congestion control overly conservative
+        transport.initial_rtt(Duration::from_millis(5));
+
         // Allow more concurrent streams for video frame broadcasting
         transport.max_concurrent_bidi_streams(1024u32.into());
         transport.max_concurrent_uni_streams(1024u32.into());
+
+        // Stream-level receive window: 1MB (enough for ~100 encoded frames)
+        // Smaller than default to limit buffering-induced latency
+        transport.stream_receive_window(quinn::VarInt::from_u32(1024 * 1024));
+        // Connection-level receive window: 2MB total across all streams
+        transport.receive_window(quinn::VarInt::from_u32(2 * 1024 * 1024));
+        // Send window: 2MB to allow burst without waiting for ACKs on LAN
+        transport.send_window(2 * 1024 * 1024);
+
         // Enable datagrams for future low-latency frame delivery
         transport.datagram_receive_buffer_size(Some(65536));
         transport
