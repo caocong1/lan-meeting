@@ -395,6 +395,11 @@ impl QuicStream {
             .finish()
             .map_err(|e| NetworkError::ConnectionFailed(format!("Finish error: {}", e)))
     }
+
+    /// Stop receiving (sends STOP_SENDING to peer, causing their writes to fail immediately)
+    pub fn stop_receiving(&mut self) {
+        self.recv.stop(0u32.into()).ok();
+    }
 }
 
 /// Get connection by ID

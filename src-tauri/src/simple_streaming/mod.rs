@@ -261,7 +261,7 @@ pub async fn handle_viewer_request(peer_ip: &str) {
         // Send frame on the same persistent stream
         let frame_data = encode_frame_message(timestamp, &encoded.data);
         if let Err(e) = stream.send_framed(&frame_data).await {
-            log::error!("[SIMPLE] Failed to send frame {}: {}", sequence, e);
+            log::info!("[SIMPLE] Viewer disconnected (send failed at frame {}): {}", sequence, e);
             break;
         }
 
@@ -457,7 +457,10 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
         }
     }
 
-    // Cleanup
+    // Cleanup: stop receiving so sharer's send_framed fails immediately
+    stream.stop_receiving();
+    log::info!("[SIMPLE] Stream stopped, notifying sharer");
+
     if let Some(ref handle) = window_handle {
         handle.close();
     }
