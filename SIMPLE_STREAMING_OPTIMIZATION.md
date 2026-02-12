@@ -121,22 +121,26 @@ Render thread: frame N received and uploaded (1280x720, YUV420)
 
 ## Step 6: 切换硬件编码器 (FFmpeg VideoToolbox/NVENC)
 
-**问题**: 软件编码有上限, 即使优化也受限于 CPU
+**问题**: 软件编码 ~50ms/帧, 是 capture(11ms) 之外最大的瓶颈
 
 **方案**: 用已有的 `FfmpegEncoder` (Windows 走 NVENC, macOS 走 VideoToolbox)
+- `create_encoder()` 自动检测硬件编码器, 失败则回退 OpenH264
+- 同时优化 FfmpegEncoder 的 bgra_to_yuv420 为两遍法
+- 处理硬件编码器可能返回的空帧 (B-frame 缓冲)
 
 **改动文件**:
-- `src-tauri/src/simple_streaming/mod.rs` - 编码器创建改用 `encoder::create_encoder()`
+- `src-tauri/src/simple_streaming/mod.rs` - 编码器改用 `encoder::create_encoder()`, encoder 类型改为 `Box<dyn VideoEncoder>`
+- `src-tauri/src/encoder/ffmpeg/mod.rs` - bgra_to_yuv420 两遍法优化
 
 **预期日志**:
 ```
-Using FFmpeg encoder: h264_nvenc (或 h264_videotoolbox)
-[SIMPLE] Frame 0 encoded: ~3000-8000 bytes, encode time: <1ms
+[SIMPLE] Using encoder: FFmpeg NVENC (Hardware)
+[SIMPLE] Frame N timing: capture=Xms scale=Xms encode=<5ms total=Xms
 ```
 
-**预期效果**: 编码速度提升 10x+, 支持更高分辨率和帧率, 可提升到 1920x1080@60fps
+**预期效果**: encode 从 ~50ms 降到 <5ms, 总帧时间从 ~110ms 降到 ~60ms
 
-**状态**: [ ] 未开始
+**状态**: [x] 已完成
 
 ---
 

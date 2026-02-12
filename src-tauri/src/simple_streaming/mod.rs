@@ -8,8 +8,7 @@ use crate::capture::{self, ScreenCapture};
 use crate::decoder::software::SoftwareDecoder;
 use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
 use crate::encoder::scaler::FrameScaler;
-use crate::encoder::software::SoftwareEncoder;
-use crate::encoder::{EncoderConfig, EncoderPreset, VideoEncoder};
+use crate::encoder::{self, EncoderConfig, EncoderPreset, VideoEncoder};
 use crate::network::quic::{self, QuicStream};
 use crate::renderer::{RenderFrame, RenderWindow, RenderWindowHandle};
 use parking_lot::RwLock;
@@ -84,9 +83,10 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
     let encode_height = pre_scaler.dst_height;
     log::info!("[SIMPLE] Pre-scaler: {}x{} -> {}x{}", width, height, encode_width, encode_height);
 
-    // Create encoder with downscaled dimensions
-    let mut encoder = SoftwareEncoder::new()
+    // Create encoder - try hardware first, fall back to software
+    let mut encoder = encoder::create_encoder()
         .map_err(|e| format!("[SIMPLE] Failed to create encoder: {}", e))?;
+    log::info!("[SIMPLE] Using encoder: {}", encoder.info());
 
     let encoder_config = EncoderConfig {
         width: encode_width,
@@ -138,7 +138,7 @@ pub fn start_sharing(display_id: u32) -> Result<(), String> {
 struct SharerState {
     capture: Box<dyn ScreenCapture>,
     pre_scaler: FrameScaler,
-    encoder: SoftwareEncoder,
+    encoder: Box<dyn VideoEncoder>,
     encode_width: u32,
     encode_height: u32,
     stop_rx: mpsc::Receiver<()>,
@@ -267,6 +267,12 @@ pub async fn handle_viewer_request(peer_ip: &str) {
                 continue;
             }
         };
+
+        // Skip empty frames (encoder buffering, e.g. B-frame reordering)
+        if encoded.data.is_empty() {
+            sequence += 1;
+            continue;
+        }
 
         if sequence < 10 || sequence % 50 == 0 {
             log::info!("[SIMPLE] Frame {} encoded: {} bytes, type={:?}",

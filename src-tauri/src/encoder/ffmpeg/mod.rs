@@ -190,39 +190,46 @@ impl FfmpegEncoder {
         Err(EncoderError::HardwareNotAvailable)
     }
 
-    /// Convert BGRA to YUV420P for encoding
+    /// Convert BGRA to YUV420P for encoding (two-pass, no branching)
     fn bgra_to_yuv420(bgra: &[u8], width: u32, height: u32) -> Vec<u8> {
         let w = width as usize;
         let h = height as usize;
+        let bgra_stride = w * 4;
 
-        // YUV420P: Y plane (w*h) + U plane (w/2 * h/2) + V plane (w/2 * h/2)
         let y_size = w * h;
-        let uv_size = (w / 2) * (h / 2);
+        let uv_w = w / 2;
+        let uv_h = h / 2;
+        let uv_size = uv_w * uv_h;
         let mut yuv = vec![0u8; y_size + 2 * uv_size];
 
         let (y_plane, uv_planes) = yuv.split_at_mut(y_size);
         let (u_plane, v_plane) = uv_planes.split_at_mut(uv_size);
 
-        // Convert using BT.601 coefficients
+        // Pass 1: Y plane (sequential row access, no branching)
         for y in 0..h {
+            let src_row = y * bgra_stride;
+            let dst_row = y * w;
             for x in 0..w {
-                let bgra_idx = (y * w + x) * 4;
-                let b = bgra[bgra_idx] as i32;
-                let g = bgra[bgra_idx + 1] as i32;
-                let r = bgra[bgra_idx + 2] as i32;
+                let si = src_row + x * 4;
+                let b = bgra[si] as i32;
+                let g = bgra[si + 1] as i32;
+                let r = bgra[si + 2] as i32;
+                y_plane[dst_row + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+            }
+        }
 
-                // Y = 0.299*R + 0.587*G + 0.114*B
-                let y_val = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-                y_plane[y * w + x] = y_val.clamp(0, 255) as u8;
-
-                // Subsample U and V (2x2 blocks)
-                if y % 2 == 0 && x % 2 == 0 {
-                    let uv_idx = (y / 2) * (w / 2) + (x / 2);
-                    let u_val = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                    let v_val = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-                    u_plane[uv_idx] = u_val.clamp(0, 255) as u8;
-                    v_plane[uv_idx] = v_val.clamp(0, 255) as u8;
-                }
+        // Pass 2: UV planes in 2x2 blocks (top-left pixel, no per-pixel branch)
+        for by in 0..uv_h {
+            let src_row = (by * 2) * bgra_stride;
+            let uv_row = by * uv_w;
+            for bx in 0..uv_w {
+                let si = src_row + (bx * 2) * 4;
+                let b = bgra[si] as i32;
+                let g = bgra[si + 1] as i32;
+                let r = bgra[si + 2] as i32;
+                let ui = uv_row + bx;
+                u_plane[ui] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                v_plane[ui] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
             }
         }
 
