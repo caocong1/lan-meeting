@@ -80,13 +80,20 @@ impl FrameScaler {
         }
     }
 
-    /// Create a scaler that downscales to a target resolution.
-    /// Target dimensions are clamped to even numbers and to OpenH264 limits.
+    /// Create a scaler that downscales to fit within a target resolution box.
+    /// Maintains source aspect ratio (fit-inside), clamped to even numbers and OpenH264 limits.
     /// If source is already smaller than or equal to target, no scaling is done.
     pub fn new_with_target(src_width: u32, src_height: u32, target_width: u32, target_height: u32) -> Self {
-        // Ensure even dimensions and within limits
-        let dst_width = target_width.min(src_width).min(OPENH264_MAX_WIDTH) & !1;
-        let dst_height = target_height.min(src_height).min(OPENH264_MAX_HEIGHT) & !1;
+        // Fit source aspect ratio inside target box
+        let max_w = target_width.min(src_width).min(OPENH264_MAX_WIDTH);
+        let max_h = target_height.min(src_height).min(OPENH264_MAX_HEIGHT);
+
+        let scale_w = max_w as f64 / src_width as f64;
+        let scale_h = max_h as f64 / src_height as f64;
+        let scale = scale_w.min(scale_h).min(1.0); // never upscale
+
+        let dst_width = ((src_width as f64 * scale) as u32) & !1;
+        let dst_height = ((src_height as f64 * scale) as u32) & !1;
 
         let needs_scaling = dst_width != src_width || dst_height != src_height;
         let mode = if needs_scaling {
@@ -255,8 +262,17 @@ mod tests {
 
     #[test]
     fn test_downscale_target() {
+        // 3456x2160 (16:10) into 1280x720 box → height-limited → 1152x720
         let scaler = FrameScaler::new_with_target(3456, 2160, 1280, 720);
         assert!(scaler.needs_scaling);
+        assert_eq!(scaler.dst_width, 1152);
+        assert_eq!(scaler.dst_height, 720);
+    }
+
+    #[test]
+    fn test_downscale_preserves_aspect_ratio() {
+        // 1920x1080 (16:9) into 1280x720 box → exact fit
+        let scaler = FrameScaler::new_with_target(1920, 1080, 1280, 720);
         assert_eq!(scaler.dst_width, 1280);
         assert_eq!(scaler.dst_height, 720);
     }
