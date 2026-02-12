@@ -272,14 +272,71 @@ pub fn get_self_info() -> Result<SelfInfo, String> {
     })
 }
 
-/// Get local IP address
+/// Check if an IPv4 address is a real private LAN IP
+/// (not a VPN/proxy virtual interface like 198.18.0.0/15)
+pub fn is_real_lan_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 198.18.0.0/15 — Surge, ClashX and similar proxy tools
+            if octets[0] == 198 && (octets[1] == 18 || octets[1] == 19) {
+                return false;
+            }
+            // 100.64.0.0/10 — CGNAT / Tailscale / some VPNs
+            if octets[0] == 100 && (octets[1] & 0xC0) == 64 {
+                return false;
+            }
+            // Accept standard private ranges
+            // 10.0.0.0/8
+            if octets[0] == 10 {
+                return true;
+            }
+            // 172.16.0.0/12
+            if octets[0] == 172 && (16..=31).contains(&octets[1]) {
+                return true;
+            }
+            // 192.168.0.0/16
+            if octets[0] == 192 && octets[1] == 168 {
+                return true;
+            }
+            // 169.254.0.0/16 — link-local (better than nothing)
+            if octets[0] == 169 && octets[1] == 254 {
+                return true;
+            }
+            false
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
+/// Get local IP address, preferring real LAN IPs over VPN interfaces
 fn get_local_ip() -> Option<String> {
     use std::net::UdpSocket;
-    // Connect to a public IP to determine local IP (doesn't actually send data)
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    let addr = socket.local_addr().ok()?;
-    Some(addr.ip().to_string())
+
+    // Try multiple targets to get IPs from different routing paths
+    let targets = ["8.8.8.8:80", "192.168.1.1:80", "10.0.0.1:80"];
+    let mut candidates = Vec::new();
+
+    for target in &targets {
+        if let Ok(socket) = UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(target).is_ok() {
+                if let Ok(addr) = socket.local_addr() {
+                    let ip = addr.ip();
+                    if !ip.is_loopback() && !candidates.contains(&ip) {
+                        candidates.push(ip);
+                    }
+                }
+            }
+        }
+    }
+
+    // Prefer real LAN IPs over VPN IPs
+    if let Some(lan_ip) = candidates.iter().find(|ip| is_real_lan_ip(ip)) {
+        return Some(lan_ip.to_string());
+    }
+
+    // Fall back to any non-loopback IP
+    candidates.first().map(|ip| ip.to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

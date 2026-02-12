@@ -152,6 +152,10 @@ fn handle_service_event(event: ServiceEvent, app: &AppHandle) {
                 }
             }
 
+            // Log all addresses for debugging VPN/virtual interface issues
+            let all_addrs: Vec<String> = info.addresses.iter().map(|a| a.to_ip_addr().to_string()).collect();
+            log::debug!("mDNS resolved addresses: {:?}", all_addrs);
+
             let device = extract_device_info(&info);
             if let Some(device) = device {
                 log::info!("Discovered device: {} ({})", device.name, device.ip);
@@ -190,18 +194,19 @@ fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
         .map(|prop| prop.val_str().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // Get first IPv4 address
-    let ip = info
+    // Collect all IPv4 addresses, prefer real LAN IPs over VPN IPs
+    let ipv4_addrs: Vec<std::net::IpAddr> = info
         .addresses
         .iter()
-        .find_map(|scoped_ip| {
-            let ip_addr = scoped_ip.to_ip_addr();
-            if ip_addr.is_ipv4() {
-                Some(ip_addr.to_string())
-            } else {
-                None
-            }
-        })?;
+        .map(|scoped_ip| scoped_ip.to_ip_addr())
+        .filter(|ip| ip.is_ipv4() && !ip.is_loopback())
+        .collect();
+
+    let ip = ipv4_addrs
+        .iter()
+        .find(|ip| crate::commands::is_real_lan_ip(ip))
+        .or_else(|| ipv4_addrs.first())
+        .map(|ip| ip.to_string())?;
 
     let port = info.port;
 
