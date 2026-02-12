@@ -194,7 +194,7 @@ fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
         .map(|prop| prop.val_str().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
 
-    // Collect all IPv4 addresses, prefer real LAN IPs over VPN IPs
+    // Collect all IPv4 addresses from the resolved service
     let ipv4_addrs: Vec<std::net::IpAddr> = info
         .addresses
         .iter()
@@ -202,9 +202,12 @@ fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
         .filter(|ip| ip.is_ipv4() && !ip.is_loopback())
         .collect();
 
+    // Priority: 1) same subnet as us, 2) real LAN IP, 3) any IPv4
+    let our_subnets = crate::commands::get_local_subnets();
     let ip = ipv4_addrs
         .iter()
-        .find(|ip| crate::commands::is_real_lan_ip(ip))
+        .find(|ip| crate::commands::is_same_subnet(ip, &our_subnets))
+        .or_else(|| ipv4_addrs.iter().find(|ip| crate::commands::is_real_lan_ip(ip)))
         .or_else(|| ipv4_addrs.first())
         .map(|ip| ip.to_string())?;
 

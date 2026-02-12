@@ -309,6 +309,43 @@ pub fn is_real_lan_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+/// Get all local IPv4 subnets (network address, prefix length) for same-subnet matching.
+/// Used by mDNS discovery to prefer peer IPs on the same subnet as us.
+pub fn get_local_subnets() -> Vec<(u32, u32)> {
+    let ifaces = match if_addrs::get_if_addrs() {
+        Ok(i) => i,
+        Err(_) => return Vec::new(),
+    };
+
+    ifaces
+        .iter()
+        .filter(|iface| !iface.is_loopback())
+        .filter_map(|iface| {
+            if let if_addrs::IfAddr::V4(ref v4) = iface.addr {
+                let ip = u32::from_be_bytes(v4.ip.octets());
+                let mask = u32::from_be_bytes(v4.netmask.octets());
+                if is_real_lan_ip(&std::net::IpAddr::V4(v4.ip)) {
+                    Some((ip & mask, mask))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Check if an IP is on one of our local subnets
+pub fn is_same_subnet(ip: &std::net::IpAddr, subnets: &[(u32, u32)]) -> bool {
+    if let std::net::IpAddr::V4(v4) = ip {
+        let ip_u32 = u32::from_be_bytes(v4.octets());
+        subnets.iter().any(|(net, mask)| (ip_u32 & mask) == *net)
+    } else {
+        false
+    }
+}
+
 /// Get local IP address by enumerating network interfaces.
 /// Prefers real LAN IPs (192.168/10/172.16) over VPN/proxy virtual interfaces.
 fn get_local_ip() -> Option<String> {
