@@ -683,21 +683,72 @@ pub struct AppSettings {
     pub default_bitrate: u32,
 }
 
+/// Settings file path
+fn settings_path() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|p| p.join("lan-meeting").join("settings.json"))
+}
+
+/// Load settings from disk, falling back to defaults
+fn load_settings_from_disk() -> AppSettings {
+    let hostname = hostname::get()
+        .map(|h| h.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "Unknown".to_string());
+
+    let defaults = AppSettings {
+        device_name: hostname,
+        quality: "auto".to_string(),
+        fps: 30,
+        default_resolution: 1, // 1080p
+        default_bitrate: 1,    // 4 Mbps
+    };
+
+    let Some(path) = settings_path() else {
+        return defaults;
+    };
+
+    match std::fs::read_to_string(&path) {
+        Ok(json) => match serde_json::from_str::<AppSettings>(&json) {
+            Ok(mut saved) => {
+                // Use saved device_name only if non-empty
+                if saved.device_name.is_empty() {
+                    saved.device_name = defaults.device_name;
+                }
+                log::info!("Settings loaded from {}", path.display());
+                saved
+            }
+            Err(e) => {
+                log::warn!("Failed to parse settings file: {}", e);
+                defaults
+            }
+        },
+        Err(_) => defaults,
+    }
+}
+
+/// Save settings to disk
+fn save_settings_to_disk(settings: &AppSettings) {
+    let Some(path) = settings_path() else {
+        log::warn!("Cannot determine settings path");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match serde_json::to_string_pretty(settings) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                log::error!("Failed to write settings to {}: {}", path.display(), e);
+            } else {
+                log::info!("Settings saved to {}", path.display());
+            }
+        }
+        Err(e) => log::error!("Failed to serialize settings: {}", e),
+    }
+}
+
 /// Global settings
 static SETTINGS: once_cell::sync::Lazy<parking_lot::RwLock<AppSettings>> =
-    once_cell::sync::Lazy::new(|| {
-        let hostname = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "Unknown".to_string());
-
-        parking_lot::RwLock::new(AppSettings {
-            device_name: hostname,
-            quality: "auto".to_string(),
-            fps: 30,
-            default_resolution: 1, // 1080p
-            default_bitrate: 1,    // 4 Mbps
-        })
-    });
+    once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(load_settings_from_disk()));
 
 /// Get current settings
 #[tauri::command]
@@ -709,6 +760,7 @@ pub fn get_settings() -> AppSettings {
 #[tauri::command]
 pub fn save_settings(settings: AppSettings) -> Result<(), String> {
     log::info!("Saving settings: {:?}", settings);
+    save_settings_to_disk(&settings);
     *SETTINGS.write() = settings;
     Ok(())
 }

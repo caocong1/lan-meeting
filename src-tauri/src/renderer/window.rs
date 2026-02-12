@@ -218,28 +218,28 @@ impl RenderWindow {
         // Read default resolution/bitrate indices from settings
         let (default_res_idx, default_br_idx) = crate::commands::get_default_streaming_indices();
 
-        // Create floating toolbar on main thread
+        // Create floating toolbar on main thread (using child NSPanel for reliable rendering over Metal)
         let (toolbar_tx, toolbar_rx) =
             std::sync::mpsc::channel::<Result<(usize, usize, usize), String>>();
 
-        let content_view_addr = ns_view_addr;
+        let window_addr_for_toolbar = ns_window_addr;
         app_handle
             .run_on_main_thread(move || {
-                let result = create_toolbar(content_view_addr, width, default_res_idx, default_br_idx);
+                let result = create_toolbar_panel(window_addr_for_toolbar, width, default_res_idx, default_br_idx);
                 let _ = toolbar_tx.send(result);
             })
             .map_err(|e| {
                 RendererError::WindowError(format!("Failed to dispatch toolbar creation: {}", e))
             })?;
 
-        let (toolbar_view_addr, res_popup_addr, br_popup_addr) = toolbar_rx
+        let (toolbar_panel_addr, res_popup_addr, br_popup_addr) = toolbar_rx
             .recv()
             .map_err(|e| {
                 RendererError::WindowError(format!("Toolbar channel closed: {}", e))
             })?
             .map_err(|e| RendererError::WindowError(format!("Toolbar creation failed: {}", e)))?;
 
-        log::debug!("Floating toolbar created on main thread (res={}, br={})", default_res_idx, default_br_idx);
+        log::debug!("Floating toolbar panel created on main thread (res={}, br={})", default_res_idx, default_br_idx);
 
         // Create wgpu Instance + Surface on main thread
         // (Metal's get_metal_layer MUST be called on the UI thread)
@@ -465,17 +465,41 @@ impl RenderWindow {
                     let should_show = mouse_in_window
                         && last_mouse_move_time.elapsed() < toolbar_hide_delay;
 
-                    // Update toolbar visibility on state change
+                    // Update toolbar panel visibility on state change
                     if should_show != toolbar_visible {
                         toolbar_visible = should_show;
                         if let Some(handle) = crate::APP_HANDLE.get() {
-                            let tb_addr = toolbar_view_addr;
+                            let panel_addr = toolbar_panel_addr;
+                            let win_addr = ns_window_addr;
                             let show = should_show;
                             let _ = handle.run_on_main_thread(move || unsafe {
                                 use objc2::msg_send;
                                 use objc2::runtime::AnyObject;
-                                let tb = tb_addr as *mut AnyObject;
-                                let _: () = msg_send![tb, setHidden: !show];
+                                use objc2_foundation::{NSPoint, NSRect, NSSize};
+                                let panel = panel_addr as *mut AnyObject;
+                                if show {
+                                    // Reposition panel to stay centered at top of main window
+                                    let main_win = win_addr as *mut AnyObject;
+                                    let main_frame: NSRect = msg_send![main_win, frame];
+                                    let content_rect: NSRect = msg_send![
+                                        main_win,
+                                        contentRectForFrameRect: main_frame
+                                    ];
+                                    let toolbar_w: f64 = 320.0;
+                                    let toolbar_h: f64 = 36.0;
+                                    let px = content_rect.origin.x
+                                        + (content_rect.size.width - toolbar_w) / 2.0;
+                                    let py = content_rect.origin.y
+                                        + content_rect.size.height - toolbar_h - 8.0;
+                                    let panel_frame = NSRect::new(
+                                        NSPoint::new(px, py),
+                                        NSSize::new(toolbar_w, toolbar_h),
+                                    );
+                                    let _: () = msg_send![panel, setFrame: panel_frame, display: false];
+                                    let _: () = msg_send![panel, orderFront: std::ptr::null::<AnyObject>()];
+                                } else {
+                                    let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
+                                }
                             });
                         }
                     }
@@ -522,11 +546,15 @@ impl RenderWindow {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
 
-            // Cleanup: close the window on the main thread
+            // Cleanup: close the toolbar panel and window on the main thread
             if let Some(handle) = crate::APP_HANDLE.get() {
                 let _ = handle.run_on_main_thread(move || unsafe {
                     use objc2::msg_send;
                     use objc2::runtime::AnyObject;
+                    // Close toolbar panel first
+                    let panel = toolbar_panel_addr as *mut AnyObject;
+                    let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
+                    let _: () = msg_send![panel, close];
                     let window = ns_window_addr as *mut AnyObject;
                     let _: () = msg_send![window, close];
                     // Release the retained window (we retained it during creation)
@@ -648,41 +676,57 @@ fn create_ns_window(
     }
 }
 
-/// Create a floating toolbar with separate resolution and bitrate dropdowns.
-/// Returns (toolbar_view_addr, resolution_popup_addr, bitrate_popup_addr) as usize.
+/// Create a floating toolbar as a child NSPanel window.
+/// Using a child window ensures reliable rendering over Metal/wgpu content,
+/// since subviews of the Metal content view may be hidden by the CAMetalLayer.
+/// Returns (panel_addr, resolution_popup_addr, bitrate_popup_addr) as usize.
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
-fn create_toolbar(content_view_addr: usize, _window_width: u32, default_res_idx: usize, default_br_idx: usize) -> Result<(usize, usize, usize), String> {
+fn create_toolbar_panel(window_addr: usize, _window_width: u32, default_res_idx: usize, default_br_idx: usize) -> Result<(usize, usize, usize), String> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
     unsafe {
-        let content_view = content_view_addr as *mut AnyObject;
-        let bounds: NSRect = msg_send![content_view, bounds];
+        let main_window = window_addr as *mut AnyObject;
 
-        // Toolbar dimensions: wider to fit two dropdowns side by side
+        // Compute panel position from main window's content area
+        let main_frame: NSRect = msg_send![main_window, frame];
+        let content_rect: NSRect = msg_send![main_window, contentRectForFrameRect: main_frame];
+
         let toolbar_w: f64 = 320.0;
         let toolbar_h: f64 = 36.0;
-        let toolbar_x = (bounds.size.width - toolbar_w) / 2.0;
-        let toolbar_y = bounds.size.height - toolbar_h - 8.0; // near top (macOS Y is bottom-up)
+        let panel_x = content_rect.origin.x + (content_rect.size.width - toolbar_w) / 2.0;
+        let panel_y = content_rect.origin.y + content_rect.size.height - toolbar_h - 8.0;
 
-        // Create toolbar container using NSBox for reliable background rendering
-        let box_cls = AnyClass::get(c"NSBox").ok_or("NSBox class not found")?;
-        let toolbar_alloc: *mut AnyObject = msg_send![box_cls, alloc];
-        let toolbar_frame = NSRect::new(
-            NSPoint::new(toolbar_x, toolbar_y),
+        let panel_frame = NSRect::new(
+            NSPoint::new(panel_x, panel_y),
             NSSize::new(toolbar_w, toolbar_h),
         );
-        let toolbar: *mut AnyObject = msg_send![toolbar_alloc, initWithFrame: toolbar_frame];
-        if toolbar.is_null() {
-            return Err("NSBox alloc failed".to_string());
+
+        // Create borderless, non-activating NSPanel
+        let panel_cls = AnyClass::get(c"NSPanel").ok_or("NSPanel class not found")?;
+        let panel_alloc: *mut AnyObject = msg_send![panel_cls, alloc];
+        // NSWindowStyleMaskBorderless = 0, NSWindowStyleMaskNonactivatingPanel = 128
+        let style_mask: usize = 128;
+        let panel: *mut AnyObject = msg_send![
+            panel_alloc,
+            initWithContentRect: panel_frame,
+            styleMask: style_mask,
+            backing: 2usize,
+            defer: false
+        ];
+        if panel.is_null() {
+            return Err("NSPanel alloc failed".to_string());
         }
 
-        // NSBoxCustom = 4, NSNoBorder = 0
-        let _: () = msg_send![toolbar, setBoxType: 4isize];
-        let _: () = msg_send![toolbar, setBorderType: 0isize];
+        // Panel configuration
+        let _: () = msg_send![panel, setOpaque: false];
+        let _: () = msg_send![panel, setHasShadow: false];
+        // Clicking the panel should not steal focus from the main window
+        let _: () = msg_send![panel, setBecomesKeyOnlyIfNeeded: true];
 
+        // Set semi-transparent dark background on the panel window itself
         let ns_color_cls = AnyClass::get(c"NSColor").ok_or("NSColor not found")?;
         let bg_color: *mut AnyObject = msg_send![
             ns_color_cls,
@@ -691,14 +735,21 @@ fn create_toolbar(content_view_addr: usize, _window_width: u32, default_res_idx:
             blue: 0.0f64,
             alpha: 0.7f64
         ];
-        let _: () = msg_send![toolbar, setFillColor: bg_color];
-        let _: () = msg_send![toolbar, setCornerRadius: 10.0f64];
+        let _: () = msg_send![panel, setBackgroundColor: bg_color];
 
-        // Enable autoresizing to stay at top-center on window resize
-        // NSViewMinXMargin(1) | NSViewMaxXMargin(4) | NSViewMinYMargin(8)
-        let autoresizing: usize = 1 | 4 | 8;
-        let _: () = msg_send![toolbar, setAutoresizingMask: autoresizing];
+        // Round corners via panel's contentView layer
+        let panel_content: *mut AnyObject = msg_send![panel, contentView];
+        let _: () = msg_send![panel_content, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![panel_content, layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setCornerRadius: 10.0f64];
+            let _: () = msg_send![layer, setMasksToBounds: true];
+        }
 
+        // Add as child window of main window (NSWindowAbove = 1)
+        let _: () = msg_send![main_window, addChildWindow: panel, ordered: 1isize];
+
+        // Create popup buttons on the panel's content view
         let popup_cls = AnyClass::get(c"NSPopUpButton").ok_or("NSPopUpButton not found")?;
         let font_cls = AnyClass::get(c"NSFont").ok_or("NSFont not found")?;
         let font: *mut AnyObject = msg_send![font_cls, systemFontOfSize: 12.0f64];
@@ -750,17 +801,16 @@ fn create_toolbar(content_view_addr: usize, _window_width: u32, default_res_idx:
         let br_idx = (default_br_idx as isize).min(crate::simple_streaming::BITRATE_OPTIONS.len() as isize - 1);
         let _: () = msg_send![br_popup, selectItemAtIndex: br_idx];
 
-        // Add both popups to toolbar, toolbar to content view
-        let _: () = msg_send![toolbar, addSubview: res_popup];
-        let _: () = msg_send![toolbar, addSubview: br_popup];
-        let _: () = msg_send![content_view, addSubview: toolbar];
+        // Add both popups to panel's content view
+        let _: () = msg_send![panel_content, addSubview: res_popup];
+        let _: () = msg_send![panel_content, addSubview: br_popup];
 
-        // Initially hidden
-        let _: () = msg_send![toolbar, setHidden: true];
+        // Initially hidden (orderOut removes from screen)
+        let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
 
-        log::debug!("Floating toolbar created with resolution + bitrate dropdowns");
+        log::debug!("Floating toolbar panel created with resolution + bitrate dropdowns");
 
-        Ok((toolbar as usize, res_popup as usize, br_popup as usize))
+        Ok((panel as usize, res_popup as usize, br_popup as usize))
     }
 }
 
