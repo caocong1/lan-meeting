@@ -637,6 +637,27 @@ async fn handle_simple_stream_with_first(
     // Process the first message
     process_simple_message(first_data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
 
+    // Send initial resolution request based on saved settings (if window was just created)
+    if window_handle.is_some() {
+        let (res_idx, br_idx) = crate::commands::get_default_streaming_indices();
+        if res_idx != 0 || br_idx != 0 {
+            let res_opts = &crate::simple_streaming::RESOLUTION_OPTIONS;
+            let br_opts = &crate::simple_streaming::BITRATE_OPTIONS;
+            if let (Some(res), Some(br)) = (
+                res_opts.get(res_idx.min(res_opts.len() - 1)),
+                br_opts.get(br_idx.min(br_opts.len() - 1)),
+            ) {
+                log::info!("[SIMPLE] Sending initial resolution request: {} + {}", res.label, br.label);
+                let req = crate::simple_streaming::encode_resolution_request_msg(
+                    res.target_width, res.target_height, br.bitrate,
+                );
+                if let Err(e) = stream.send_framed(&req).await {
+                    log::error!("[SIMPLE] Failed to send initial resolution request: {}", e);
+                }
+            }
+        }
+    }
+
     // Continue reading from stream
     log::info!("[SIMPLE] Entering frame receive loop from {}", peer_ip);
     loop {

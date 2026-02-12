@@ -387,9 +387,64 @@ pub async fn handle_viewer_request(peer_ip: &str) {
     let _ = stream.send_framed(&stop_data).await;
     let _ = stream.finish().await;
 
-    let _ = state.capture.stop();
-    SIMPLE_SHARER_ACTIVE.store(false, Ordering::SeqCst);
-    log::info!("[SIMPLE] Streaming ended after {} frames", sequence);
+    // Check if sharing was stopped by user vs viewer just disconnected
+    let user_stopped = !state.active.load(Ordering::SeqCst);
+
+    if user_stopped {
+        let _ = state.capture.stop();
+        SIMPLE_SHARER_ACTIVE.store(false, Ordering::SeqCst);
+        log::info!("[SIMPLE] Streaming ended (user stopped) after {} frames", sequence);
+    } else {
+        // Viewer disconnected but sharer is still active - restore state for next viewer
+        log::info!("[SIMPLE] Viewer disconnected after {} frames, ready for next viewer", sequence);
+
+        // Reset encoder/scaler to default 720p for next viewer
+        let src_w = state.pre_scaler.src_width;
+        let src_h = state.pre_scaler.src_height;
+        let pre_scaler = FrameScaler::new_with_target(src_w, src_h, SIMPLE_TARGET_WIDTH, SIMPLE_TARGET_HEIGHT);
+        let encode_width = pre_scaler.dst_width;
+        let encode_height = pre_scaler.dst_height;
+
+        match encoder::create_encoder() {
+            Ok(mut new_encoder) => {
+                let enc_config = EncoderConfig {
+                    width: encode_width,
+                    height: encode_height,
+                    fps: SIMPLE_FPS,
+                    bitrate: 2_000_000,
+                    max_bitrate: 4_000_000,
+                    keyframe_interval: SIMPLE_FPS,
+                    preset: EncoderPreset::UltraFast,
+                };
+                if let Err(e) = new_encoder.init(enc_config) {
+                    log::error!("[SIMPLE] Failed to reinit encoder for next viewer: {}", e);
+                    let _ = state.capture.stop();
+                    SIMPLE_SHARER_ACTIVE.store(false, Ordering::SeqCst);
+                    return;
+                }
+
+                // Create new stop channel
+                let (stop_tx, stop_rx) = mpsc::channel::<()>(1);
+                *SIMPLE_STOP_TX.write() = Some(stop_tx);
+
+                *SHARER_STATE.write() = Some(SharerState {
+                    capture: state.capture,
+                    pre_scaler,
+                    encoder: new_encoder,
+                    encode_width,
+                    encode_height,
+                    stop_rx,
+                    active: state.active,
+                });
+                log::info!("[SIMPLE] Sharer state restored, waiting for next viewer");
+            }
+            Err(e) => {
+                log::error!("[SIMPLE] Failed to create encoder for next viewer: {}", e);
+                let _ = state.capture.stop();
+                SIMPLE_SHARER_ACTIVE.store(false, Ordering::SeqCst);
+            }
+        }
+    }
 }
 
 /// Stop simple sharing
@@ -495,7 +550,8 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                 log::info!("[SIMPLE] Decoder (re)initialized for {}x{} (output=YUV420)", width, height);
 
                 // Only create window if not already open (resolution changes keep existing window)
-                if window_handle.is_none() {
+                let is_first_start = window_handle.is_none();
+                if is_first_start {
                     let title = format!("[Simple] {} screen", peer_ip);
                     match RenderWindow::create(&title, width, height) {
                         Ok(handle) => {
@@ -505,6 +561,18 @@ pub async fn handle_simple_stream(stream: &mut QuicStream, peer_ip: &str) {
                         Err(e) => {
                             log::error!("[SIMPLE] Failed to create render window: {}", e);
                             break;
+                        }
+                    }
+
+                    // Send initial resolution request based on saved settings
+                    let (res_idx, br_idx) = crate::commands::get_default_streaming_indices();
+                    if res_idx != 0 || br_idx != 0 {
+                        let res = &RESOLUTION_OPTIONS[res_idx.min(RESOLUTION_OPTIONS.len() - 1)];
+                        let br = &BITRATE_OPTIONS[br_idx.min(BITRATE_OPTIONS.len() - 1)];
+                        log::info!("[SIMPLE] Sending initial resolution request: {} + {}", res.label, br.label);
+                        let req = encode_resolution_request(res.target_width, res.target_height, br.bitrate);
+                        if let Err(e) = stream.send_framed(&req).await {
+                            log::error!("[SIMPLE] Failed to send initial resolution request: {}", e);
                         }
                     }
                 }

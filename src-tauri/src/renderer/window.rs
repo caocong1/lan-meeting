@@ -667,42 +667,37 @@ fn create_toolbar(content_view_addr: usize, _window_width: u32, default_res_idx:
         let toolbar_x = (bounds.size.width - toolbar_w) / 2.0;
         let toolbar_y = bounds.size.height - toolbar_h - 8.0; // near top (macOS Y is bottom-up)
 
-        // Create toolbar container NSView
-        let view_cls = AnyClass::get(c"NSView").ok_or("NSView class not found")?;
-        let toolbar_alloc: *mut AnyObject = msg_send![view_cls, alloc];
-        let toolbar: *mut AnyObject = msg_send![toolbar_alloc, init];
-        if toolbar.is_null() {
-            return Err("NSView alloc failed".to_string());
-        }
-
+        // Create toolbar container using NSBox for reliable background rendering
+        let box_cls = AnyClass::get(c"NSBox").ok_or("NSBox class not found")?;
+        let toolbar_alloc: *mut AnyObject = msg_send![box_cls, alloc];
         let toolbar_frame = NSRect::new(
             NSPoint::new(toolbar_x, toolbar_y),
             NSSize::new(toolbar_w, toolbar_h),
         );
-        let _: () = msg_send![toolbar, setFrame: toolbar_frame];
-        let _: () = msg_send![toolbar, setWantsLayer: true];
+        let toolbar: *mut AnyObject = msg_send![toolbar_alloc, initWithFrame: toolbar_frame];
+        if toolbar.is_null() {
+            return Err("NSBox alloc failed".to_string());
+        }
+
+        // NSBoxCustom = 4, NSNoBorder = 0
+        let _: () = msg_send![toolbar, setBoxType: 4isize];
+        let _: () = msg_send![toolbar, setBorderType: 0isize];
+
+        let ns_color_cls = AnyClass::get(c"NSColor").ok_or("NSColor not found")?;
+        let bg_color: *mut AnyObject = msg_send![
+            ns_color_cls,
+            colorWithRed: 0.0f64,
+            green: 0.0f64,
+            blue: 0.0f64,
+            alpha: 0.7f64
+        ];
+        let _: () = msg_send![toolbar, setFillColor: bg_color];
+        let _: () = msg_send![toolbar, setCornerRadius: 10.0f64];
 
         // Enable autoresizing to stay at top-center on window resize
         // NSViewMinXMargin(1) | NSViewMaxXMargin(4) | NSViewMinYMargin(8)
         let autoresizing: usize = 1 | 4 | 8;
         let _: () = msg_send![toolbar, setAutoresizingMask: autoresizing];
-
-        // Style the layer: dark semi-transparent background with rounded corners
-        let layer: *mut AnyObject = msg_send![toolbar, layer];
-        if !layer.is_null() {
-            let _: () = msg_send![layer, setCornerRadius: 10.0f64];
-
-            let ns_color_cls = AnyClass::get(c"NSColor").ok_or("NSColor not found")?;
-            let bg_color: *mut AnyObject = msg_send![
-                ns_color_cls,
-                colorWithRed: 0.0f64,
-                green: 0.0f64,
-                blue: 0.0f64,
-                alpha: 0.7f64
-            ];
-            let cg_color: *mut AnyObject = msg_send![bg_color, CGColor];
-            let _: () = msg_send![layer, setBackgroundColor: cg_color];
-        }
 
         let popup_cls = AnyClass::get(c"NSPopUpButton").ok_or("NSPopUpButton not found")?;
         let font_cls = AnyClass::get(c"NSFont").ok_or("NSFont not found")?;
