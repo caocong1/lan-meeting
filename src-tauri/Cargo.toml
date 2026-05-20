@@ -55,7 +55,7 @@ openh264 = "0.6"           # Cisco OpenH264 software encoder (fallback)
 lz4_flex = "0.11"          # Fast compression for raw frames
 
 # Hardware-accelerated video codecs
-ffmpeg-next = "8.0"        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
+ffmpeg-next = "8.1"        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
 
 # GStreamer hardware video decoding (cross-platform, Vulkan/D3D11/VideoToolbox/VAAPI)
 gstreamer = "0.24"

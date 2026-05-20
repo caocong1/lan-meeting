@@ -1,0 +1,269 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1778830886227,
+  "projectRoot": "/Users/dongli/Workspace/lan-meeting",
+  "techStack": {
+    "languages": [
+      {
+        "name": "JavaScript/TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "package.json"
+        ]
+      },
+      {
+        "name": "TypeScript",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "tsconfig.json"
+        ]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": "solid-js",
+        "version": "1.9.11",
+        "category": "frontend"
+      },
+      {
+        "name": "vite",
+        "version": "7.3.1",
+        "category": "build"
+      }
+    ],
+    "packageManager": "npm",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "npm run build",
+    "testCommand": null,
+    "lintCommand": null,
+    "devCommand": "npm run dev",
+    "scripts": {
+      "dev": "vite",
+      "build": "vite build",
+      "preview": "vite preview",
+      "tauri": "tauri",
+      "tauri:dev": "tauri dev",
+      "tauri:dev:win": "cmd /c dev-win.cmd",
+      "tauri:build": "tauri build",
+      "check": "tsc --noEmit"
+    }
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": "type-based"
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 2,
+      "lastAccessed": 1778830886178,
+      "keyFiles": [
+        "index.html",
+        "viewer.html"
+      ]
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 4,
+      "lastAccessed": 1778830886178,
+      "keyFiles": [
+        "App.tsx",
+        "index.tsx",
+        "viewer.tsx"
+      ]
+    },
+    "src-tauri": {
+      "path": "src-tauri",
+      "purpose": null,
+      "fileCount": 6,
+      "lastAccessed": 1778830886220,
+      "keyFiles": [
+        "Cargo.lock",
+        "Cargo.toml",
+        "build.rs",
+        "tauri.conf.json"
+      ]
+    },
+    "dist/assets": {
+      "path": "dist/assets",
+      "purpose": "Static assets",
+      "fileCount": 4,
+      "lastAccessed": 1778830886221,
+      "keyFiles": [
+        "event--dOVmouK.js",
+        "event-xwhBLpFN.css",
+        "main-CxuKZB2Z.js"
+      ]
+    },
+    "src/components": {
+      "path": "src/components",
+      "purpose": "UI components",
+      "fileCount": 0,
+      "lastAccessed": 1778830886221,
+      "keyFiles": []
+    },
+    "src/types": {
+      "path": "src/types",
+      "purpose": "Type definitions",
+      "fileCount": 1,
+      "lastAccessed": 1778830886221,
+      "keyFiles": [
+        "webcodecs.d.ts"
+      ]
+    },
+    "src/utils": {
+      "path": "src/utils",
+      "purpose": "Utility functions",
+      "fileCount": 0,
+      "lastAccessed": 1778830886222,
+      "keyFiles": []
+    },
+    "src-tauri/src": {
+      "path": "src-tauri/src",
+      "purpose": "Source code",
+      "fileCount": 2,
+      "lastAccessed": 1778830886222,
+      "keyFiles": [
+        "lib.rs",
+        "main.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/components/MeetingRoom/index.tsx",
+      "accessCount": 10,
+      "lastAccessed": 1778832050328,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/src/commands/mod.rs",
+      "accessCount": 5,
+      "lastAccessed": 1778832231749,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/src/transfer/mod.rs",
+      "accessCount": 5,
+      "lastAccessed": 1778832380787,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/src/lib.rs",
+      "accessCount": 5,
+      "lastAccessed": 1778832441493,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/src/network/quic.rs",
+      "accessCount": 4,
+      "lastAccessed": 1778832410397,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 2,
+      "lastAccessed": 1778830990965,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/Cargo.toml",
+      "accessCount": 2,
+      "lastAccessed": 1778905490680,
+      "type": "file"
+    },
+    {
+      "path": "src/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831748514,
+      "type": "file"
+    },
+    {
+      "path": "src/viewer.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831753132,
+      "type": "file"
+    },
+    {
+      "path": "src/App.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831756391,
+      "type": "file"
+    },
+    {
+      "path": "src/stores/app.ts",
+      "accessCount": 1,
+      "lastAccessed": 1778831759342,
+      "type": "file"
+    },
+    {
+      "path": "src/components/Chat/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831767025,
+      "type": "file"
+    },
+    {
+      "path": "src/components/Settings/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831770000,
+      "type": "file"
+    },
+    {
+      "path": "src/components/DeviceList/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831783668,
+      "type": "file"
+    },
+    {
+      "path": "src/components/ScreenShare/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831787122,
+      "type": "file"
+    },
+    {
+      "path": "src/components/Viewer/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831790127,
+      "type": "file"
+    },
+    {
+      "path": "src/components/AddDeviceModal/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831793544,
+      "type": "file"
+    },
+    {
+      "path": "src/components/FileTransfer/index.tsx",
+      "accessCount": 1,
+      "lastAccessed": 1778831879394,
+      "type": "file"
+    },
+    {
+      "path": "src-tauri/src/network/discovery.rs",
+      "accessCount": 1,
+      "lastAccessed": 1778832152151,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

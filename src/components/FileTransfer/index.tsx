@@ -68,18 +68,34 @@ export const FileTransferPanel: Component = () => {
     }
   };
 
+  // Select target peer
+  const [targetPeerId, setTargetPeerId] = createSignal<string>("");
+  const [availablePeers, setAvailablePeers] = createSignal<Array<{ id: string; name: string }>>([]);
+
+  // Fetch available peers
+  const fetchPeers = async () => {
+    try {
+      const devices = await invoke<Array<{ id: string; name: string }>>("get_devices");
+      setAvailablePeers(devices.map(d => ({ id: d.id, name: d.name })));
+    } catch (e) {
+      console.error("Failed to fetch peers:", e);
+    }
+  };
+
   // Select and offer a file
   const selectFile = async () => {
     try {
+      const peerId = targetPeerId();
+      if (!peerId) {
+        return;
+      }
+
       const selected = await open({
         multiple: false,
         title: "选择要传输的文件",
       });
 
       if (selected) {
-        // For now, we need a peer ID - in real use, this would come from connected device
-        // TODO: Show device selector dialog
-        const peerId = "localhost"; // Placeholder
         await invoke("offer_file", {
           filePath: selected,
           peerId,
@@ -156,6 +172,7 @@ export const FileTransferPanel: Component = () => {
 
     await fetchDownloadDir();
     await fetchTransfers();
+    await fetchPeers();
 
     // Poll for updates every 2 seconds
     const interval = setInterval(fetchTransfers, 2000);
@@ -189,10 +206,28 @@ export const FileTransferPanel: Component = () => {
               </p>
             </div>
           </div>
-          <button class="btn-primary" onClick={selectFile}>
-            <span class="i-lucide-upload mr-2"></span>
-            发送文件
-          </button>
+          <div class="flex items-center gap-2">
+            <select
+              value={targetPeerId()}
+              onChange={(e) => setTargetPeerId(e.currentTarget.value)}
+              class="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-primary-500"
+            >
+              <option value="">选择目标设备</option>
+              <For each={availablePeers()}>
+                {(peer) => (
+                  <option value={peer.id}>{peer.name}</option>
+                )}
+              </For>
+            </select>
+            <button
+              class="btn-primary disabled:opacity-50 disabled:cursor-not-allowed"
+              onClick={selectFile}
+              disabled={!targetPeerId()}
+            >
+              <span class="i-lucide-upload mr-2"></span>
+              发送文件
+            </button>
+          </div>
         </div>
       </div>
 

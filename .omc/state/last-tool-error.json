@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"prlctl exec \\\"Windows 11\\\" --user \\\"sorawatcher\\\" --password \\\"04110411\\\" \\\"cmd /c echo hello\\\" 2>&1\",\"timeout\":10000,\"description\":\"Try doubled PIN\"}",
+  "error": "Exit code 255\nUnable to authenticate the user. Make sure that the specified credentials are correct and try again.",
+  "timestamp": "2026-05-16T04:36:12.979Z",
+  "retry_count": 4
+}

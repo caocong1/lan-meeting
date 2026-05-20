@@ -186,23 +186,23 @@ export const Chat: Component = () => {
 
         {/* Input Area */}
         <div class="border-t border-gray-200 pt-4 mt-4">
-          <div class="flex gap-3">
-            <input
-              type="text"
+          <div class="flex gap-3 items-end">
+            <textarea
               placeholder="输入消息..."
               value={inputText()}
               onInput={(e) => setInputText(e.currentTarget.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
+                if (e.key === "Enter" && !e.shiftKey && !e.ctrlKey) {
                   e.preventDefault();
                   sendMessage();
                 }
               }}
-              class="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              rows={1}
+              class="flex-1 px-4 py-3 border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent resize-none max-h-32"
               disabled={isLoading()}
             />
             <button
-              class="btn-primary px-6"
+              class="btn-primary px-6 self-end"
               onClick={sendMessage}
               disabled={!inputText().trim() || isLoading()}
             >
@@ -213,7 +213,7 @@ export const Chat: Component = () => {
               )}
             </button>
           </div>
-          <p class="text-xs text-gray-400 mt-2">按 Enter 发送消息</p>
+          <p class="text-xs text-gray-400 mt-2">按 Enter 发送，Shift+Enter 换行</p>
         </div>
       </div>
     </div>

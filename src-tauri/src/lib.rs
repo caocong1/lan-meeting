@@ -36,14 +36,17 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
-            // Initialize logging
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Debug)
-                        .build(),
-                )?;
-            }
+            // Initialize logging — info level in release, debug in development
+            let log_level = if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            };
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log_level)
+                    .build(),
+            )?;
 
             // Initialize dialog plugin
             app.handle().plugin(tauri_plugin_dialog::init())?;
@@ -511,8 +514,109 @@ async fn handle_message(
                         t.start();
                     }
 
-                    // TODO: Start sending chunks in a separate task
-                    log::info!("Starting to send file chunks for {}", file_id);
+                    let peer_id = transfer.peer_id.clone();
+                    let file_id = file_id.clone();
+                    let file_size = transfer.info.size;
+                    let chunk_size = transfer::CHUNK_SIZE as u64;
+                    let total_chunks = (file_size + chunk_size - 1) / chunk_size;
+
+                    tokio::spawn(async move {
+                        log::info!(
+                            "Starting to send file chunks for {} ({} chunks, {} bytes)",
+                            file_id,
+                            total_chunks,
+                            file_size
+                        );
+
+                        for i in 0..total_chunks {
+                            let offset = i * chunk_size;
+
+                            // Check if transfer was cancelled
+                            if let Some(current) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                                if !matches!(current.status, transfer::TransferStatus::InProgress) {
+                                    log::warn!("File transfer {} cancelled during chunk sending", file_id);
+                                    return;
+                                }
+                            }
+
+                            // Read chunk from file
+                            let chunk = match transfer::get_transfer_manager().get_chunk(&file_id, offset) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    log::error!("Failed to read chunk for {}: {}", file_id, e);
+                                    return;
+                                }
+                            };
+
+                            // Send chunk to peer
+                            let msg = network::protocol::Message::FileChunk {
+                                file_id: file_id.clone(),
+                                offset,
+                                data: chunk,
+                            };
+
+                            let encoded = match network::protocol::encode(&msg) {
+                                Ok(data) => data,
+                                Err(e) => {
+                                    log::error!("Failed to encode chunk for {}: {}", file_id, e);
+                                    return;
+                                }
+                            };
+
+                            if let Err(e) = network::quic::send_to_peer(&peer_id, &encoded).await {
+                                log::error!("Failed to send chunk for {}: {}", file_id, e);
+                                return;
+                            }
+
+                            // Update progress
+                            let bytes_sent = ((i + 1) * chunk_size).min(file_size);
+                            if let Some(mut t) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                                t.update_progress(bytes_sent);
+                            }
+
+                            // Emit progress event to frontend
+                            if let Some(handle) = APP_HANDLE.get() {
+                                #[derive(serde::Serialize, Clone)]
+                                struct OutgoingProgress {
+                                    file_id: String,
+                                    progress: f32,
+                                    bytes: u64,
+                                }
+                                if let Some(current) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                                    let _ = handle.emit("file-progress", OutgoingProgress {
+                                        file_id: file_id.clone(),
+                                        progress: current.progress,
+                                        bytes: bytes_sent,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Send completion message
+                        let complete_msg = network::protocol::Message::FileComplete {
+                            file_id: file_id.clone(),
+                        };
+                        if let Ok(encoded) = network::protocol::encode(&complete_msg) {
+                            let _ = network::quic::send_to_peer(&peer_id, &encoded).await;
+                        }
+
+                        if let Some(mut t) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                            t.complete();
+                        }
+
+                        log::info!("File transfer {} completed successfully", file_id);
+
+                        // Notify frontend
+                        if let Some(handle) = APP_HANDLE.get() {
+                            #[derive(serde::Serialize, Clone)]
+                            struct OutgoingComplete {
+                                file_id: String,
+                            }
+                            let _ = handle.emit("file-complete", &OutgoingComplete {
+                                file_id: file_id.clone(),
+                            });
+                        }
+                    });
                 }
             }
         }

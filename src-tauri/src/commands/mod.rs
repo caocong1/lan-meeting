@@ -651,14 +651,37 @@ pub async fn start_service(app_handle: tauri::AppHandle) -> Result<(), String> {
 pub async fn stop_service() -> Result<(), String> {
     log::info!("Stopping network service");
 
+    // Stop streaming first
+    {
+        use crate::streaming::get_streaming_manager;
+        let manager_arc = get_streaming_manager();
+        let mut manager = manager_arc.write();
+        if let Some(ref mut m) = *manager {
+            m.stop_sync();
+        }
+    }
+
+    // Stop sharing flag
+    *IS_SHARING.write() = false;
+
     // Disconnect all peers
     disconnect(None).await?;
+
+    // Close QUIC endpoint
+    if let Some(endpoint) = crate::QUIC_ENDPOINT.get() {
+        endpoint.close();
+        log::info!("QUIC endpoint closed");
+    }
 
     // Clear device list
     discovery::clear_devices();
 
+    // Shutdown mDNS
+    discovery::shutdown();
+
     *SERVICE_RUNNING.write() = false;
 
+    log::info!("Network service stopped");
     Ok(())
 }
 
@@ -759,6 +782,23 @@ pub fn get_settings() -> AppSettings {
 /// Save settings
 #[tauri::command]
 pub fn save_settings(settings: AppSettings) -> Result<(), String> {
+    // Validate settings
+    if settings.device_name.trim().is_empty() {
+        return Err("设备名称不能为空".to_string());
+    }
+    if settings.device_name.len() > 50 {
+        return Err("设备名称过长（最多50个字符）".to_string());
+    }
+    if ![15, 30, 60].contains(&settings.fps) {
+        return Err("帧率必须为 15、30 或 60".to_string());
+    }
+    if settings.default_resolution > 3 {
+        return Err("无效的分辨率设置".to_string());
+    }
+    if settings.default_bitrate > 3 {
+        return Err("无效的码率设置".to_string());
+    }
+
     log::info!("Saving settings: {:?}", settings);
     save_settings_to_disk(&settings);
     *SETTINGS.write() = settings;
@@ -1049,13 +1089,27 @@ pub async fn request_control(peer_id: String) -> Result<(), String> {
 
     log::info!("Requesting control of {}", peer_id);
 
+    // Find peer IP from device list (peer_id is device ID, but send_to_peer needs IP)
+    let peer_ip = discovery::get_devices()
+        .into_iter()
+        .find(|d| d.id == peer_id)
+        .map(|d| d.ip)
+        .unwrap_or_else(|| {
+            // If peer_id looks like an IP, use it directly
+            if peer_id.parse::<std::net::Ipv4Addr>().is_ok() {
+                peer_id.clone()
+            } else {
+                peer_id.clone()
+            }
+        });
+
     let self_info = get_self_info()?;
     let msg = protocol::Message::ControlRequest {
         from_user: self_info.name,
     };
 
     if let Ok(encoded) = protocol::encode(&msg) {
-        quic::send_to_peer(&peer_id, &encoded)
+        quic::send_to_peer(&peer_ip, &encoded)
             .await
             .map_err(|e| format!("Failed to send control request: {}", e))?;
     }

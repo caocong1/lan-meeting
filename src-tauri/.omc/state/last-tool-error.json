@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"cd /Users/dongli/Workspace && tar czf /tmp/lan-meeting-src.tar.gz lan-meeting/ --exclude='lan-meeting/src-tauri/target' --exclude='lan-meeting/node_modules' --exclude='lan-meeting/.git' --...",
+  "error": "Exit code 1\ntar: --exclude=lan-meeting/src-tauri/target: Cannot stat: No such file or directory\ntar: --exclude=lan-meeting/node_modules: Cannot stat: No such file or directory\ntar: --exclude=lan-meeting/.git: Cannot stat: No such file or directory\ntar: --exclude=lan-meeting/dist: Cannot stat: No such file or directory\ntar: --exclude=lan-meeting/src-tauri/.git: Cannot stat: No such file or directory\ntar: Error exit delayed from previous errors.",
+  "timestamp": "2026-05-15T08:32:28.736Z",
+  "retry_count": 1
+}
