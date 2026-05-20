@@ -928,6 +928,10 @@ pub async fn broadcast_sharing_status(is_sharing: bool, display_id: Option<u32>)
         }
     }
 
+    if let Err(e) = discovery::update_advertised_sharing(is_sharing) {
+        log::warn!("Failed to update mDNS sharing status: {}", e);
+    }
+
     // Create sharing status message
     let msg = protocol::Message::ScreenOffer {
         displays: if is_sharing {

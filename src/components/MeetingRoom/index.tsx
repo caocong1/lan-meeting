@@ -526,38 +526,29 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                           </span>
                         )}
                         {!member.is_self && (
-                          <>
-                            <button
-                              class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
-                              onClick={() => handleWatchScreen(member)}
-                              disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
-                            >
-                              {watchingIds().has(member.id) && (
-                                <span class="i-lucide-loader-2 animate-spin"></span>
-                              )}
-                              {watchingIds().has(member.id) ? "打开中..." : "观看"}
-                            </button>
-                            <button
-                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
-                              onClick={() => handleRequestControl(member)}
-                              disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
-                            >
-                              {controlRequestingIds().has(member.id) && (
-                                <span class="i-lucide-loader-2 animate-spin"></span>
-                              )}
-                              {controlRequestingIds().has(member.id) ? "请求中..." : "请求控制"}
-                            </button>
-                          </>
-                        )}
-                      </>
-                    ) : (
-                      <div class="flex items-center gap-2">
-                        <span class="text-sm text-gray-400">未共享</span>
-                        {!member.is_self && (
                           isConnected(member) ? (
-                            <span class="px-2 py-1 bg-green-100 text-green-700 text-xs rounded-full">
-                              已连接
-                            </span>
+                            <>
+                              <button
+                                class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                onClick={() => handleWatchScreen(member)}
+                                disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
+                              >
+                                {watchingIds().has(member.id) && (
+                                  <span class="i-lucide-loader-2 animate-spin"></span>
+                                )}
+                                {watchingIds().has(member.id) ? "打开中..." : "观看"}
+                              </button>
+                              <button
+                                class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
+                                onClick={() => handleRequestControl(member)}
+                                disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
+                              >
+                                {controlRequestingIds().has(member.id) && (
+                                  <span class="i-lucide-loader-2 animate-spin"></span>
+                                )}
+                                {controlRequestingIds().has(member.id) ? "请求中..." : "请求控制"}
+                              </button>
+                            </>
                           ) : (
                             <button
                               class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
@@ -570,6 +561,15 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                               {connectingIds().has(member.id) ? "连接中..." : "连接"}
                             </button>
                           )
+                        )}
+                      </>
+                    ) : (
+                      <div class="flex items-center gap-2">
+                        <span class="text-sm text-gray-400">未共享</span>
+                        {!member.is_self && isConnected(member) && (
+                          <span class="px-2 py-1 bg-green-100 text-green-700 text-xs rounded-full">
+                            已连接
+                          </span>
                         )}
                       </div>
                     )}

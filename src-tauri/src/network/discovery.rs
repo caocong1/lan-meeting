@@ -59,6 +59,9 @@ static MDNS_DAEMON: once_cell::sync::Lazy<Option<ServiceDaemon>> =
 /// Full name of our registered mDNS service (for unregister on stop)
 static REGISTERED_SERVICE_FULLNAME: RwLock<Option<String>> = RwLock::new(None);
 
+/// Sharing state advertised through mDNS TXT records.
+static ADVERTISED_IS_SHARING: AtomicBool = AtomicBool::new(false);
+
 /// Whether the browse event loop is already running
 static BROWSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
@@ -112,6 +115,10 @@ fn register_service(daemon: &ServiceDaemon) -> Result<(), NetworkError> {
     properties.insert("id".to_string(), device_id.to_string());
     properties.insert("name".to_string(), hostname.clone());
     properties.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+    properties.insert(
+        "is_sharing".to_string(),
+        ADVERTISED_IS_SHARING.load(Ordering::SeqCst).to_string(),
+    );
 
     // Collect our real LAN IPs to register with mDNS
     let lan_ips: Vec<String> = if_addrs::get_if_addrs()
@@ -156,6 +163,21 @@ fn register_service(daemon: &ServiceDaemon) -> Result<(), NetworkError> {
     *REGISTERED_SERVICE_FULLNAME.write() = Some(fullname);
     log::info!("mDNS service registered successfully");
     Ok(())
+}
+
+/// Update the sharing state included in our mDNS advertisement.
+pub fn update_advertised_sharing(is_sharing: bool) -> Result<(), NetworkError> {
+    ADVERTISED_IS_SHARING.store(is_sharing, Ordering::SeqCst);
+
+    if REGISTERED_SERVICE_FULLNAME.read().is_none() {
+        return Ok(());
+    }
+
+    let daemon = MDNS_DAEMON
+        .as_ref()
+        .ok_or_else(|| NetworkError::DiscoveryError("Failed to create mDNS daemon".to_string()))?;
+
+    register_service(daemon)
 }
 
 /// Browse for other services on the network
@@ -206,9 +228,14 @@ fn handle_service_event(event: ServiceEvent, app: &AppHandle) {
             log::debug!("mDNS resolved addresses: {:?}", all_addrs);
 
             let device = extract_device_info(&info);
-            if let Some(device) = device {
-                log::info!("Discovered device: {} ({})", device.name, device.ip);
-                add_device(device.clone());
+            if let Some((device, sharing_status_known)) = device {
+                log::info!(
+                    "Discovered device: {} ({}, sharing: {})",
+                    device.name,
+                    device.ip,
+                    device.is_sharing
+                );
+                let device = upsert_device(device, sharing_status_known);
 
                 // Notify frontend
                 let _ = app.emit("device-discovered", &device);
@@ -235,13 +262,17 @@ fn handle_service_event(event: ServiceEvent, app: &AppHandle) {
 }
 
 /// Extract device info from ResolvedService
-fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
+fn extract_device_info(info: &ResolvedService) -> Option<(DiscoveredDevice, bool)> {
     let id = info.txt_properties.get("id")?.val_str().to_string();
     let name = info
         .txt_properties
         .get("name")
         .map(|prop| prop.val_str().to_string())
         .unwrap_or_else(|| "Unknown".to_string());
+    let sharing_prop = info.txt_properties.get("is_sharing");
+    let is_sharing = sharing_prop
+        .map(|prop| matches!(prop.val_str(), "true" | "1" | "yes"))
+        .unwrap_or(false);
 
     // Collect all IPv4 addresses from the resolved service
     let ipv4_addrs: Vec<std::net::IpAddr> = info
@@ -262,15 +293,15 @@ fn extract_device_info(info: &ResolvedService) -> Option<DiscoveredDevice> {
 
     let port = info.port;
 
-    Some(DiscoveredDevice {
+    Some((DiscoveredDevice {
         id,
         name,
         ip,
         port,
         status: DeviceStatus::Online,
         last_seen: now_ms(),
-        is_sharing: false,
-    })
+        is_sharing,
+    }, sharing_prop.is_some()))
 }
 
 /// Find device by mDNS fullname
@@ -287,6 +318,10 @@ pub fn get_devices() -> Vec<DiscoveredDevice> {
 
 /// Add or update a device
 pub fn add_device(device: DiscoveredDevice) {
+    upsert_device(device, false);
+}
+
+fn upsert_device(device: DiscoveredDevice, update_sharing: bool) -> DiscoveredDevice {
     let mut devices = DEVICES.write();
     if let Some(existing) = devices.get_mut(&device.id) {
         existing.name = device.name;
@@ -298,11 +333,13 @@ pub fn add_device(device: DiscoveredDevice) {
             existing.status = device.status;
         }
 
-        if device.is_sharing || !existing.is_sharing {
+        if update_sharing || device.is_sharing || !existing.is_sharing {
             existing.is_sharing = device.is_sharing;
         }
+        existing.clone()
     } else {
-        devices.insert(device.id.clone(), device);
+        devices.insert(device.id.clone(), device.clone());
+        device
     }
 }
 
