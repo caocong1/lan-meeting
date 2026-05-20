@@ -205,6 +205,9 @@ impl StreamingManager {
             let mut last_frame_time = std::time::Instant::now();
             let mut last_waiting_log = std::time::Instant::now() - Duration::from_secs(5);
             let mut sequence: u32 = 0;
+            let mut last_viewer_epoch = VIEWER_REQUEST_EPOCH.load(Ordering::SeqCst);
+            let mut last_raw_frame: Option<Vec<u8>> = None;
+            let mut timeout_count: u32 = 0;
 
             // Frame send bookkeeping. Frames currently use short streams for
             // reliable delivery across macOS and Windows/Parallels; keep the
@@ -233,6 +236,13 @@ impl StreamingManager {
                     continue;
                 }
 
+                let viewer_epoch = VIEWER_REQUEST_EPOCH.load(Ordering::SeqCst);
+                if viewer_epoch != last_viewer_epoch {
+                    encoder.request_keyframe();
+                    last_viewer_epoch = viewer_epoch;
+                    log::info!("Viewer request changed; forcing next stream frame to keyframe");
+                }
+
                 // Frame rate limiting
                 let elapsed = last_frame_time.elapsed();
                 if elapsed < frame_interval {
@@ -240,12 +250,39 @@ impl StreamingManager {
                 }
                 last_frame_time = std::time::Instant::now();
 
-                // Capture frame
-                let frame = match capture.capture_frame() {
-                    Ok(f) => f,
+                // Capture frame. On Windows, DXGI returns WAIT_TIMEOUT when the
+                // desktop is static. Re-encode the last raw frame so a newly
+                // opened viewer still receives an initial keyframe.
+                let frame_data = match capture.capture_frame() {
+                    Ok(frame) => {
+                        timeout_count = 0;
+                        last_raw_frame = Some(frame.data);
+                        last_raw_frame.as_ref().expect("last frame was just stored")
+                    }
                     Err(e) => {
-                        log::warn!("Capture error: {}", e);
-                        continue;
+                        if e.to_string().contains("Frame timeout") {
+                            timeout_count = timeout_count.saturating_add(1);
+                            if let Some(frame) = last_raw_frame.as_ref() {
+                                if timeout_count == 1 || timeout_count % 150 == 0 {
+                                    log::debug!(
+                                        "Capture timed out; reusing last raw frame ({} timeouts)",
+                                        timeout_count
+                                    );
+                                }
+                                frame
+                            } else {
+                                if timeout_count == 1 || timeout_count % 30 == 0 {
+                                    log::warn!(
+                                        "Capture timed out and no previous frame is available yet"
+                                    );
+                                }
+                                continue;
+                            }
+                        } else {
+                            timeout_count = 0;
+                            log::warn!("Capture error: {}", e);
+                            continue;
+                        }
                     }
                 };
 
@@ -256,7 +293,7 @@ impl StreamingManager {
                     .unwrap_or(0);
 
                 // Encode frame
-                let scaled_frame = pre_scaler.scale(&frame.data);
+                let scaled_frame = pre_scaler.scale(frame_data);
                 let encoded = match encoder.encode(&scaled_frame, timestamp) {
                     Ok(e) => e,
                     Err(e) => {
@@ -550,6 +587,8 @@ static PENDING_SCREEN_STARTS: once_cell::sync::Lazy<
 static ACTIVE_VIEWERS: once_cell::sync::Lazy<Arc<RwLock<HashSet<String>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
 
+static VIEWER_REQUEST_EPOCH: AtomicU32 = AtomicU32::new(0);
+
 /// Get viewer sessions
 pub fn get_viewer_sessions() -> Arc<RwLock<HashMap<String, ViewerSession>>> {
     VIEWER_SESSIONS.clone()
@@ -557,9 +596,13 @@ pub fn get_viewer_sessions() -> Arc<RwLock<HashMap<String, ViewerSession>>> {
 
 /// Mark a peer as actively watching this screen.
 pub fn add_active_viewer(peer_ip: String) {
+    VIEWER_REQUEST_EPOCH.fetch_add(1, Ordering::SeqCst);
+
     let mut viewers = ACTIVE_VIEWERS.write();
     if viewers.insert(peer_ip.clone()) {
         log::info!("Activated screen viewer {}", peer_ip);
+    } else {
+        log::info!("Refreshed screen viewer {}", peer_ip);
     }
 }
 
@@ -611,7 +654,11 @@ pub fn create_viewer_session(
         started_immediately = true;
     }
 
-    VIEWER_SESSIONS.write().insert(peer_ip, session);
+    let mut sessions = VIEWER_SESSIONS.write();
+    if let Some(mut previous) = sessions.remove(&peer_ip) {
+        previous.close();
+    }
+    sessions.insert(peer_ip, session);
     Ok(started_immediately)
 }
 
