@@ -200,9 +200,9 @@ impl StreamingManager {
             let mut last_frame_time = std::time::Instant::now();
             let mut sequence: u32 = 0;
 
-            // Maintain persistent streams per peer for efficient frame delivery
-            // Instead of opening a new stream for every frame (30fps = 30 streams/sec),
-            // reuse persistent streams that stay open for the duration of streaming
+            // Frame send bookkeeping. Frames currently use short streams for
+            // reliable delivery across macOS and Windows/Parallels; keep the
+            // map available for cleanup and future persistent-stream tuning.
             let mut peer_streams: HashMap<String, crate::network::quic::QuicStream> = HashMap::new();
 
             loop {
@@ -587,16 +587,17 @@ pub async fn request_screen_stream(peer_ip: &str, display_id: u32) -> Result<(),
     Ok(())
 }
 
-/// Send frame data to all peers using persistent streams
-/// Reuses existing streams when possible, opens new ones for new peers
+/// Send frame data to all peers.
+///
+/// Control messages already use a short stream and finish the send side, and
+/// that path has been reliable across macOS and Windows/Parallels. Use the
+/// same framing for screen frames so the receiver can accept and process each
+/// frame independently.
 async fn broadcast_frame(
     data: &[u8],
-    peer_streams: &mut HashMap<String, QuicStream>,
+    _peer_streams: &mut HashMap<String, QuicStream>,
 ) -> usize {
     let connections = quic::get_all_connections();
-
-    // Track which peers we successfully sent to
-    let mut failed_peers: Vec<String> = Vec::new();
     let mut sent_count = 0usize;
 
     for conn in &connections {
@@ -605,41 +606,26 @@ async fn broadcast_frame(
         }
 
         let key = conn.remote_addr().to_string();
-
-        // Get or create a persistent stream for this peer
-        if !peer_streams.contains_key(&key) {
-            match conn.open_bi_stream().await {
-                Ok(stream) => {
-                    log::debug!("Opened persistent frame stream to {}", key);
-                    peer_streams.insert(key.clone(), stream);
-                }
-                Err(e) => {
-                    log::warn!("Failed to open stream to {}: {}", key, e);
-                    continue;
-                }
+        let mut stream = match conn.open_bi_stream().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                log::warn!("Failed to open frame stream to {}: {}", key, e);
+                continue;
             }
+        };
+
+        if let Err(e) = stream.send_framed(data).await {
+            log::warn!("Failed to send frame to {}: {}", key, e);
+            continue;
         }
 
-        if let Some(stream) = peer_streams.get_mut(&key) {
-            if let Err(e) = stream.send_framed(data).await {
-                log::warn!("Failed to send frame to {}: {}, will reopen stream", key, e);
-                failed_peers.push(key);
-            } else {
-                sent_count += 1;
-            }
+        if let Err(e) = stream.finish().await {
+            log::warn!("Failed to finish frame stream to {}: {}", key, e);
+            continue;
         }
+
+        sent_count += 1;
     }
 
-    // Remove failed streams so they get reopened on the next frame
-    for key in failed_peers {
-        peer_streams.remove(&key);
-    }
-
-    // Remove streams for peers that are no longer connected
-    let active_keys: std::collections::HashSet<String> = connections
-        .iter()
-        .map(|c| c.remote_addr().to_string())
-        .collect();
-    peer_streams.retain(|key, _| active_keys.contains(key));
     sent_count
 }

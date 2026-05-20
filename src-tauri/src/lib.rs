@@ -125,6 +125,7 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
     loop {
         match conn.accept_bi_stream().await {
             Ok(mut stream) => {
+                log::debug!("Accepted bidirectional stream from {}", conn.remote_addr());
                 let conn_clone = conn.clone();
                 tokio::spawn(async move {
                     // Read first message to detect if this is a simple stream
@@ -153,10 +154,25 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
                     codec.feed(&first_data);
 
                     // Process messages from the first read
+                    let mut decoded_first_message = false;
                     while let Ok(Some(msg)) = codec.decode() {
+                        decoded_first_message = true;
+                        log::debug!(
+                            "Received {:?} from {} (first payload, {} bytes)",
+                            msg.message_type(),
+                            conn_clone.remote_addr(),
+                            first_data.len()
+                        );
                         if let Err(e) = handle_message(&msg, &mut stream, &conn_clone).await {
                             log::error!("Failed to handle message: {}", e);
                         }
+                    }
+                    if !decoded_first_message {
+                        log::warn!(
+                            "No protocol message decoded from first stream payload from {} ({} bytes)",
+                            conn_clone.remote_addr(),
+                            first_data.len()
+                        );
                     }
 
                     // Handle subsequent stream messages
@@ -167,13 +183,24 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
 
                                 // Process all complete messages
                                 while let Ok(Some(msg)) = codec.decode() {
+                                    log::debug!(
+                                        "Received {:?} from {} ({} bytes)",
+                                        msg.message_type(),
+                                        conn_clone.remote_addr(),
+                                        data.len()
+                                    );
                                     if let Err(e) = handle_message(&msg, &mut stream, &conn_clone).await {
                                         log::error!("Failed to handle message: {}", e);
                                     }
                                 }
                             }
                             Err(e) => {
-                                log::debug!("Stream closed: {}", e);
+                                let message = e.to_string();
+                                if message.contains("stream finished early") {
+                                    log::trace!("Stream closed after message: {}", message);
+                                } else {
+                                    log::debug!("Stream closed: {}", message);
+                                }
                                 break;
                             }
                         }
