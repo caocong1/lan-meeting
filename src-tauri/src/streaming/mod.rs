@@ -198,6 +198,7 @@ impl StreamingManager {
 
             let frame_interval = Duration::from_micros(1_000_000 / fps as u64);
             let mut last_frame_time = std::time::Instant::now();
+            let mut last_waiting_log = std::time::Instant::now() - Duration::from_secs(5);
             let mut sequence: u32 = 0;
 
             // Frame send bookkeeping. Frames currently use short streams for
@@ -214,6 +215,20 @@ impl StreamingManager {
 
                 if !is_streaming.load(Ordering::SeqCst) {
                     break;
+                }
+
+                let peer_count = quic::get_all_connections()
+                    .into_iter()
+                    .filter(|conn| conn.is_alive())
+                    .count();
+                if peer_count == 0 {
+                    if last_waiting_log.elapsed() >= Duration::from_secs(5) {
+                        log::info!("Streaming is armed, waiting for a connected viewer");
+                        last_waiting_log = std::time::Instant::now();
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    last_frame_time = std::time::Instant::now();
+                    continue;
                 }
 
                 // Frame rate limiting
