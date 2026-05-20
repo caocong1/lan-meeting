@@ -227,6 +227,7 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
     }
     // Also clean up the QUIC connection entry
     network::quic::remove_connection_by_ip(&peer_ip);
+    streaming::remove_active_viewer(&peer_ip);
 }
 
 /// Handle a protocol message
@@ -422,6 +423,7 @@ async fn handle_message(
                         log::error!("Failed to send ScreenStart to {}: {}", remote_ip, e);
                     } else {
                         log::info!("Sent ScreenStart to {} ({}x{} @ {}fps)", remote_ip, width, height, fps);
+                        streaming::add_active_viewer(remote_ip.clone());
                         if let Some(handle) = APP_HANDLE.get() {
                             #[derive(serde::Serialize, Clone)]
                             struct ViewerConnectedEvent {
@@ -539,6 +541,7 @@ async fn handle_message(
         Message::ScreenStop => {
             let remote_ip = _conn.remote_addr().ip().to_string();
             log::info!("Received screen stop from {}", remote_ip);
+            streaming::remove_active_viewer(&remote_ip);
 
             // Stop viewer session (closes native window)
             let sessions = streaming::get_viewer_sessions();

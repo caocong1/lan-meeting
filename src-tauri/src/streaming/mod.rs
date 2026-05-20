@@ -9,7 +9,7 @@ use crate::network::protocol::{self, Message};
 use crate::network::quic::{self, QuicStream};
 use crate::renderer::{RenderFrame, RenderWindow, RenderWindowHandle};
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -168,6 +168,11 @@ impl StreamingManager {
             config.fps
         );
 
+        // Expose the encoded dimensions to request-time ScreenStart responses.
+        self.width = encode_width;
+        self.height = encode_height;
+        clear_active_viewers();
+
         // Create stop channel
         let (stop_tx, mut stop_rx) = mpsc::channel::<()>(1);
         self.stop_tx = Some(stop_tx);
@@ -217,13 +222,10 @@ impl StreamingManager {
                     break;
                 }
 
-                let peer_count = quic::get_all_connections()
-                    .into_iter()
-                    .filter(|conn| conn.is_alive())
-                    .count();
-                if peer_count == 0 {
+                let active_count = active_viewer_count();
+                if active_count == 0 {
                     if last_waiting_log.elapsed() >= Duration::from_secs(5) {
-                        log::info!("Streaming is armed, waiting for a connected viewer");
+                        log::info!("Streaming is armed, waiting for a viewer request");
                         last_waiting_log = std::time::Instant::now();
                     }
                     tokio::time::sleep(Duration::from_millis(250)).await;
@@ -307,6 +309,7 @@ impl StreamingManager {
 
             let _ = capture.stop();
             is_streaming.store(false, Ordering::SeqCst);
+            clear_active_viewers();
 
             // Send ScreenStop to all peers via control streams
             let stop_msg = Message::ScreenStop;
@@ -325,6 +328,7 @@ impl StreamingManager {
         log::info!("Stopping streaming");
 
         self.is_streaming.store(false, Ordering::SeqCst);
+        clear_active_viewers();
 
         // Send stop signal (non-blocking)
         if let Some(tx) = self.stop_tx.take() {
@@ -543,9 +547,44 @@ static PENDING_SCREEN_STARTS: once_cell::sync::Lazy<
     Arc<RwLock<HashMap<String, (u32, u32, u8, String)>>>,
 > = once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+static ACTIVE_VIEWERS: once_cell::sync::Lazy<Arc<RwLock<HashSet<String>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashSet::new())));
+
 /// Get viewer sessions
 pub fn get_viewer_sessions() -> Arc<RwLock<HashMap<String, ViewerSession>>> {
     VIEWER_SESSIONS.clone()
+}
+
+/// Mark a peer as actively watching this screen.
+pub fn add_active_viewer(peer_ip: String) {
+    let mut viewers = ACTIVE_VIEWERS.write();
+    if viewers.insert(peer_ip.clone()) {
+        log::info!("Activated screen viewer {}", peer_ip);
+    }
+}
+
+/// Remove a peer from the active watching set.
+pub fn remove_active_viewer(peer_ip: &str) {
+    if ACTIVE_VIEWERS.write().remove(peer_ip) {
+        log::info!("Removed active screen viewer {}", peer_ip);
+    }
+}
+
+/// Clear all active watching state.
+pub fn clear_active_viewers() {
+    let mut viewers = ACTIVE_VIEWERS.write();
+    if !viewers.is_empty() {
+        log::info!("Clearing {} active screen viewers", viewers.len());
+        viewers.clear();
+    }
+}
+
+fn active_viewer_count() -> usize {
+    ACTIVE_VIEWERS.read().len()
+}
+
+fn is_active_viewer(peer_ip: &str) -> bool {
+    ACTIVE_VIEWERS.read().contains(peer_ip)
 }
 
 /// Store ScreenStart metadata when it arrives before the user opens a viewer.
@@ -617,6 +656,11 @@ async fn broadcast_frame(
 
     for conn in &connections {
         if !conn.is_alive() {
+            continue;
+        }
+
+        let peer_ip = conn.remote_addr().ip().to_string();
+        if !is_active_viewer(&peer_ip) {
             continue;
         }
 
