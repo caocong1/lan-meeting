@@ -23,6 +23,25 @@ interface Member {
   is_sharing: boolean;
 }
 
+interface ViewerEvent {
+  peer_ip: string;
+  error?: string | null;
+}
+
+interface ViewerConnectedEvent {
+  peer_ip: string;
+}
+
+interface ControlRequestEvent {
+  from_user: string;
+  peer_ip: string;
+}
+
+interface ConnectionReceivedEvent {
+  device_name: string;
+  ip: string;
+}
+
 interface MeetingRoomProps {
   selfInfo: SelfInfo;
   onStopService: () => void;
@@ -30,17 +49,29 @@ interface MeetingRoomProps {
   isLoading: boolean;
 }
 
+const WATCH_TIMEOUT_MS = 12_000;
+
 export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
   const [members, setMembers] = createSignal<Member[]>([]);
   const [isSharing, setIsSharing] = createSignal(false);
   const [isLoadingMembers, setIsLoadingMembers] = createSignal(true);
   const [showAddModal, setShowAddModal] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [notice, setNotice] = createSignal<string | null>(null);
   const [connectingIds, setConnectingIds] = createSignal<Set<string>>(new Set());
+  const [watchingIds, setWatchingIds] = createSignal<Set<string>>(new Set());
+  const [controlRequestingIds, setControlRequestingIds] = createSignal<Set<string>>(new Set());
+  const [viewerIps, setViewerIps] = createSignal<Set<string>>(new Set());
 
   let unlistenDiscovered: UnlistenFn | undefined;
   let unlistenRemoved: UnlistenFn | undefined;
   let unlistenSharingChanged: UnlistenFn | undefined;
+  let unlistenViewerStarted: UnlistenFn | undefined;
+  let unlistenViewerFailed: UnlistenFn | undefined;
+  let unlistenViewerConnected: UnlistenFn | undefined;
+  let unlistenControlRequest: UnlistenFn | undefined;
+  let unlistenConnectionReceived: UnlistenFn | undefined;
+  const watchTimeouts = new Map<string, number>();
 
   const fetchMembers = async () => {
     try {
@@ -103,6 +134,30 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
   };
 
   const handleMemberRemoved = (deviceId: string) => {
+    const removed = members().find(m => m.id === deviceId);
+    clearWatchTimeout(deviceId);
+    setConnectingIds(prev => {
+      const next = new Set(prev);
+      next.delete(deviceId);
+      return next;
+    });
+    setWatchingIds(prev => {
+      const next = new Set(prev);
+      next.delete(deviceId);
+      return next;
+    });
+    setControlRequestingIds(prev => {
+      const next = new Set(prev);
+      next.delete(deviceId);
+      return next;
+    });
+    if (removed) {
+      setViewerIps(prev => {
+        const next = new Set(prev);
+        next.delete(removed.ip);
+        return next;
+      });
+    }
     setMembers(prev => prev.filter(m => m.id !== deviceId));
   };
 
@@ -142,6 +197,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     try {
       await invoke("broadcast_sharing_status", { isSharing: false, displayId: null });
       setIsSharing(false);
+      setViewerIps(new Set<string>());
 
       setMembers(prev => prev.map(m =>
         m.is_self ? { ...m, is_sharing: false } : m
@@ -152,7 +208,55 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
+  const clearWatchTimeout = (memberId: string) => {
+    const timeoutId = watchTimeouts.get(memberId);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      watchTimeouts.delete(memberId);
+    }
+  };
+
+  const clearWatchingState = (memberId: string) => {
+    clearWatchTimeout(memberId);
+    setWatchingIds(prev => {
+      const next = new Set(prev);
+      next.delete(memberId);
+      return next;
+    });
+  };
+
+  const clearWatchingStateByIp = (peerIp: string) => {
+    const member = members().find(m => m.ip === peerIp);
+    if (member) {
+      clearWatchingState(member.id);
+    }
+  };
+
+  const operationLabel = (member: Member) => {
+    if (connectingIds().has(member.id)) return "正在建立连接...";
+    if (watchingIds().has(member.id)) return "正在打开观看窗口...";
+    if (controlRequestingIds().has(member.id)) return "正在发送控制请求...";
+    return null;
+  };
+
   const handleWatchScreen = async (member: Member) => {
+    if (watchingIds().has(member.id)) {
+      return;
+    }
+
+    setWatchingIds(prev => new Set(prev).add(member.id));
+    setError(null);
+    setNotice(null);
+
+    const timeoutId = window.setTimeout(() => {
+      if (!watchingIds().has(member.id)) {
+        return;
+      }
+      clearWatchingState(member.id);
+      setError(`观看请求已发送，但 ${member.name} 还没有返回屏幕流，请确认对方仍在共享并保持应用运行`);
+    }, WATCH_TIMEOUT_MS);
+    watchTimeouts.set(member.id, timeoutId);
+
     try {
       await invoke("request_screen_stream", {
         peerIp: member.ip,
@@ -160,6 +264,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
       });
     } catch (e) {
       console.error("Failed to request screen stream:", e);
+      clearWatchingState(member.id);
       setError(`请求屏幕流失败: ${e}`);
     }
   };
@@ -171,6 +276,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
 
     setConnectingIds(prev => new Set(prev).add(member.id));
     setError(null);
+    setNotice(null);
 
     try {
       await invoke("connect_to_device", { deviceId: member.id });
@@ -187,8 +293,28 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
-  const handleRequestControl = async (_member: Member) => {
-    setError("远程控制功能尚未实现，当前只能观看屏幕");
+  const handleRequestControl = async (member: Member) => {
+    if (controlRequestingIds().has(member.id)) {
+      return;
+    }
+
+    setControlRequestingIds(prev => new Set(prev).add(member.id));
+    setError(null);
+    setNotice(null);
+
+    try {
+      await invoke("request_control", { peerId: member.id });
+      setError("控制请求已发送，但控制授权和远程输入功能尚未实现，当前只能观看屏幕");
+    } catch (e) {
+      console.error("Failed to request control:", e);
+      setError(`请求控制失败: ${e}`);
+    } finally {
+      setControlRequestingIds(prev => {
+        const next = new Set(prev);
+        next.delete(member.id);
+        return next;
+      });
+    }
   };
 
   const isConnected = (member: Member) => member.status === "busy";
@@ -213,6 +339,35 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
       }
     );
 
+    unlistenViewerStarted = await listen<ViewerEvent>("viewer-started", (event) => {
+      clearWatchingStateByIp(event.payload.peer_ip);
+      const member = members().find(m => m.ip === event.payload.peer_ip);
+      if (member) {
+        setNotice(`正在观看 ${member.name} 的屏幕`);
+      }
+    });
+
+    unlistenViewerFailed = await listen<ViewerEvent>("viewer-failed", (event) => {
+      clearWatchingStateByIp(event.payload.peer_ip);
+      const member = members().find(m => m.ip === event.payload.peer_ip);
+      const name = member?.name ?? event.payload.peer_ip;
+      setError(`打开 ${name} 的屏幕失败: ${event.payload.error ?? "未知错误"}`);
+    });
+
+    unlistenViewerConnected = await listen<ViewerConnectedEvent>("viewer-connected", (event) => {
+      setViewerIps(prev => new Set(prev).add(event.payload.peer_ip));
+      const member = members().find(m => m.ip === event.payload.peer_ip);
+      setNotice(`${member?.name ?? event.payload.peer_ip} 正在观看你的屏幕`);
+    });
+
+    unlistenControlRequest = await listen<ControlRequestEvent>("control-request-received", (event) => {
+      setNotice(`${event.payload.from_user} 请求控制你的屏幕；控制授权功能尚未实现`);
+    });
+
+    unlistenConnectionReceived = await listen<ConnectionReceivedEvent>("connection-received", (event) => {
+      setNotice(`${event.payload.device_name} 已连接`);
+    });
+
     await fetchMembers();
   });
 
@@ -220,6 +375,13 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     unlistenDiscovered?.();
     unlistenRemoved?.();
     unlistenSharingChanged?.();
+    unlistenViewerStarted?.();
+    unlistenViewerFailed?.();
+    unlistenViewerConnected?.();
+    unlistenControlRequest?.();
+    unlistenConnectionReceived?.();
+    watchTimeouts.forEach(timeoutId => window.clearTimeout(timeoutId));
+    watchTimeouts.clear();
   });
 
   return (
@@ -286,6 +448,18 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
         </div>
       )}
 
+      {notice() && (
+        <div class="mx-4 mt-4 bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded-lg flex items-center justify-between">
+          <span class="text-sm">{notice()}</span>
+          <button
+            class="text-blue-500 hover:text-blue-700"
+            onClick={() => setNotice(null)}
+          >
+            <span class="i-lucide-x"></span>
+          </button>
+        </div>
+      )}
+
       <div class="px-4 py-3 flex items-center justify-between border-b border-gray-100">
         <div class="flex items-center gap-2">
           <span class="text-sm font-medium text-gray-700">会议成员</span>
@@ -330,6 +504,12 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                         )}
                       </div>
                       <span class="text-sm text-gray-500">{member.ip}</span>
+                      <Show when={operationLabel(member)}>
+                        <span class="mt-1 flex items-center gap-1 text-xs text-primary-600">
+                          <span class="i-lucide-loader-2 animate-spin"></span>
+                          {operationLabel(member)}
+                        </span>
+                      </Show>
                     </div>
                   </div>
 
@@ -340,19 +520,32 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                           <span class="w-1.5 h-1.5 bg-red-500 rounded-full animate-pulse"></span>
                           正在共享
                         </span>
+                        {member.is_self && viewerIps().size > 0 && (
+                          <span class="px-2 py-1 bg-blue-100 text-blue-700 text-xs rounded-full">
+                            {viewerIps().size} 人观看
+                          </span>
+                        )}
                         {!member.is_self && (
                           <>
                             <button
-                              class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg"
+                              class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
                               onClick={() => handleWatchScreen(member)}
+                              disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
                             >
-                              观看
+                              {watchingIds().has(member.id) && (
+                                <span class="i-lucide-loader-2 animate-spin"></span>
+                              )}
+                              {watchingIds().has(member.id) ? "打开中..." : "观看"}
                             </button>
                             <button
-                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg"
+                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
                               onClick={() => handleRequestControl(member)}
+                              disabled={watchingIds().has(member.id) || controlRequestingIds().has(member.id)}
                             >
-                              请求控制
+                              {controlRequestingIds().has(member.id) && (
+                                <span class="i-lucide-loader-2 animate-spin"></span>
+                              )}
+                              {controlRequestingIds().has(member.id) ? "请求中..." : "请求控制"}
                             </button>
                           </>
                         )}
@@ -367,10 +560,13 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                             </span>
                           ) : (
                             <button
-                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-60 disabled:cursor-not-allowed flex items-center gap-1.5"
                               onClick={() => handleConnectDevice(member)}
                               disabled={connectingIds().has(member.id)}
                             >
+                              {connectingIds().has(member.id) && (
+                                <span class="i-lucide-loader-2 animate-spin"></span>
+                              )}
                               {connectingIds().has(member.id) ? "连接中..." : "连接"}
                             </button>
                           )

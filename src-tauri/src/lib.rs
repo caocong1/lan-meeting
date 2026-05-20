@@ -395,6 +395,15 @@ async fn handle_message(
                         log::error!("Failed to send ScreenStart to {}: {}", remote_ip, e);
                     } else {
                         log::info!("Sent ScreenStart to {} ({}x{} @ {}fps)", remote_ip, width, height, fps);
+                        if let Some(handle) = APP_HANDLE.get() {
+                            #[derive(serde::Serialize, Clone)]
+                            struct ViewerConnectedEvent {
+                                peer_ip: String,
+                            }
+                            let _ = handle.emit("viewer-connected", ViewerConnectedEvent {
+                                peer_ip: remote_ip.clone(),
+                            });
+                        }
                     }
                 }
             } else {
@@ -419,9 +428,31 @@ async fn handle_message(
                 match session.handle_screen_start(*width, *height, *fps, codec) {
                     Ok(_) => {
                         log::info!("Native viewer window created for {}", remote_ip);
+                        if let Some(handle) = APP_HANDLE.get() {
+                            #[derive(serde::Serialize, Clone)]
+                            struct ViewerEvent {
+                                peer_ip: String,
+                                error: Option<String>,
+                            }
+                            let _ = handle.emit("viewer-started", ViewerEvent {
+                                peer_ip: remote_ip.clone(),
+                                error: None,
+                            });
+                        }
                     }
                     Err(e) => {
                         log::error!("Failed to start viewer session: {}", e);
+                        if let Some(handle) = APP_HANDLE.get() {
+                            #[derive(serde::Serialize, Clone)]
+                            struct ViewerEvent {
+                                peer_ip: String,
+                                error: Option<String>,
+                            }
+                            let _ = handle.emit("viewer-failed", ViewerEvent {
+                                peer_ip: remote_ip.clone(),
+                                error: Some(e.to_string()),
+                            });
+                        }
                     }
                 }
             } else {
@@ -483,8 +514,26 @@ async fn handle_message(
         }
 
         // Remote control messages will be handled in Phase 6
-        Message::ControlRequest { .. }
-        | Message::ControlGrant { .. }
+        Message::ControlRequest { from_user } => {
+            let remote_ip = _conn.remote_addr().ip().to_string();
+            log::info!(
+                "Remote control request from {} ({}) received, but control is not implemented",
+                from_user,
+                remote_ip
+            );
+            if let Some(handle) = APP_HANDLE.get() {
+                #[derive(serde::Serialize, Clone)]
+                struct ControlRequestEvent {
+                    from_user: String,
+                    peer_ip: String,
+                }
+                let _ = handle.emit("control-request-received", ControlRequestEvent {
+                    from_user: from_user.clone(),
+                    peer_ip: remote_ip,
+                });
+            }
+        }
+        Message::ControlGrant { .. }
         | Message::ControlRevoke
         | Message::InputEvent { .. } => {
             log::debug!("Remote control message received (not yet implemented)");

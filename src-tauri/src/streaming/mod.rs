@@ -514,20 +514,25 @@ pub fn store_pending_screen_start(peer_ip: String, width: u32, height: u32, fps:
         .insert(peer_ip, (width, height, fps, codec));
 }
 
-/// Create a viewer session for a peer (window created on ScreenStart)
+/// Create a viewer session for a peer.
+///
+/// Returns true when a cached ScreenStart was applied and the native window was
+/// opened immediately.
 pub fn create_viewer_session(
     peer_ip: String,
     peer_name: String,
-) -> Result<(), StreamingError> {
+) -> Result<bool, StreamingError> {
     let mut session = ViewerSession::new(peer_ip.clone(), peer_name)?;
+    let mut started_immediately = false;
 
     if let Some((width, height, fps, codec)) = PENDING_SCREEN_STARTS.write().remove(&peer_ip) {
         log::info!("Applying pending ScreenStart for {}", peer_ip);
         session.handle_screen_start(width, height, fps, &codec)?;
+        started_immediately = true;
     }
 
     VIEWER_SESSIONS.write().insert(peer_ip, session);
-    Ok(())
+    Ok(started_immediately)
 }
 
 /// Remove a viewer session

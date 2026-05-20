@@ -6,7 +6,7 @@ use crate::network::quic;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 /// Display information for screen capture
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -961,22 +961,59 @@ pub async fn broadcast_sharing_status(is_sharing: bool, display_id: Option<u32>)
 
 /// Request screen stream from a peer (creates native render window)
 #[tauri::command]
-pub async fn request_screen_stream(peer_ip: String, peer_name: String) -> Result<(), String> {
+pub async fn request_screen_stream(
+    app_handle: tauri::AppHandle,
+    peer_ip: String,
+    peer_name: String,
+) -> Result<(), String> {
     use crate::streaming;
+
+    #[derive(Serialize, Clone)]
+    struct ViewerEvent {
+        peer_ip: String,
+        error: Option<String>,
+    }
 
     log::info!("Requesting screen stream from {} ({})", peer_name, peer_ip);
 
     // Ensure we have an active QUIC connection to this peer
-    ensure_peer_connection(&peer_ip).await?;
+    if let Err(e) = ensure_peer_connection(&peer_ip).await {
+        let _ = app_handle.emit("viewer-failed", ViewerEvent {
+            peer_ip: peer_ip.clone(),
+            error: Some(e.clone()),
+        });
+        return Err(e);
+    }
 
     // Create viewer session (native window will be created on ScreenStart)
-    streaming::create_viewer_session(peer_ip.clone(), peer_name)
-        .map_err(|e| format!("Failed to create viewer session: {}", e))?;
+    let started_immediately = match streaming::create_viewer_session(peer_ip.clone(), peer_name) {
+        Ok(started) => started,
+        Err(e) => {
+            let message = format!("Failed to create viewer session: {}", e);
+            let _ = app_handle.emit("viewer-failed", ViewerEvent {
+                peer_ip: peer_ip.clone(),
+                error: Some(message.clone()),
+            });
+            return Err(message);
+        }
+    };
+
+    if started_immediately {
+        let _ = app_handle.emit("viewer-started", ViewerEvent {
+            peer_ip: peer_ip.clone(),
+            error: None,
+        });
+    }
 
     // Send request to peer
-    streaming::request_screen_stream(&peer_ip, 0)
-        .await
-        .map_err(|e| format!("Failed to request stream: {}", e))?;
+    if let Err(e) = streaming::request_screen_stream(&peer_ip, 0).await {
+        let message = format!("Failed to request stream: {}", e);
+        let _ = app_handle.emit("viewer-failed", ViewerEvent {
+            peer_ip: peer_ip.clone(),
+            error: Some(message.clone()),
+        });
+        return Err(message);
+    }
 
     Ok(())
 }
