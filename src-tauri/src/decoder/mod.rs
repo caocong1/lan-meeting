@@ -156,6 +156,18 @@ pub trait VideoDecoder: Send + Sync {
 
 /// Create the best available decoder for this platform
 pub fn create_decoder() -> Result<Box<dyn VideoDecoder>, DecoderError> {
+    // Prefer OpenH264 for now because the sender also uses OpenH264 by default.
+    // The GStreamer appsrc/decodebin pipeline can accept input without emitting
+    // frames on some macOS/Windows setups, which leaves the native viewer black
+    // even though the network stream is active.
+    match software::SoftwareDecoder::new() {
+        Ok(dec) => {
+            log::info!("Using OpenH264 software decoder");
+            return Ok(Box::new(dec));
+        }
+        Err(e) => log::warn!("OpenH264 software decoder not available: {}", e),
+    }
+
     // Try GStreamer first (cross-platform, auto-selects best hardware decoder)
     match gstreamer::GStreamerDecoder::new() {
         Ok(dec) => {

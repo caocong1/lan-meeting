@@ -292,6 +292,11 @@ impl StreamingManager {
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
 
+                if sequence > 0 && sequence % fps == 0 {
+                    encoder.request_keyframe();
+                    log::debug!("Forcing periodic keyframe at stream frame {}", sequence);
+                }
+
                 // Encode frame
                 let scaled_frame = pre_scaler.scale(frame_data);
                 let encoded = match encoder.encode(&scaled_frame, timestamp) {
