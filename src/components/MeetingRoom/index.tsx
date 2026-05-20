@@ -187,13 +187,8 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
-  const handleRequestControl = async (member: Member) => {
-    try {
-      await invoke("request_control", { peerId: member.id });
-    } catch (e) {
-      console.error("Failed to request control:", e);
-      setError(`请求控制失败: ${e}`);
-    }
+  const handleRequestControl = async (_member: Member) => {
+    setError("远程控制功能尚未实现，当前只能观看屏幕");
   };
 
   const isConnected = (member: Member) => member.status === "busy";
@@ -367,12 +362,9 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                         <span class="text-sm text-gray-400">未共享</span>
                         {!member.is_self && (
                           isConnected(member) ? (
-                            <button
-                              class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg"
-                              onClick={() => handleWatchScreen(member)}
-                            >
-                              观看
-                            </button>
+                            <span class="px-2 py-1 bg-green-100 text-green-700 text-xs rounded-full">
+                              已连接
+                            </span>
                           ) : (
                             <button
                               class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"

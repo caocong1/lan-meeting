@@ -187,17 +187,15 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
         }
     }
 
-    // Connection ended - clean up the device associated with this peer
+    // Connection ended - keep the discovered device visible, but mark it disconnected.
     let peer_ip = conn.remote_addr().ip().to_string();
-    log::info!("Peer disconnected: {}, cleaning up device", peer_ip);
-    let devices = network::discovery::get_devices();
-    for device in &devices {
-        if device.ip == peer_ip {
-            log::info!("Removing disconnected device '{}' (ip={})", device.name, device.ip);
-            network::discovery::remove_device(&device.id);
-            if let Some(app) = APP_HANDLE.get() {
-                let _ = app.emit("device-removed", &device.id);
-            }
+    log::info!("Peer disconnected: {}, marking device online", peer_ip);
+    if let Some(device) = network::discovery::update_device_status_by_ip(
+        &peer_ip,
+        network::discovery::DeviceStatus::Online,
+    ) {
+        if let Some(app) = APP_HANDLE.get() {
+            let _ = app.emit("device-discovered", &device);
         }
     }
     // Also clean up the QUIC connection entry
@@ -234,7 +232,7 @@ async fn handle_message(
                 name: name.clone(),
                 ip: remote_addr.ip().to_string(),
                 port: network::quic::DEFAULT_PORT, // Use default port, not ephemeral source port
-                status: network::discovery::DeviceStatus::Online,
+                status: network::discovery::DeviceStatus::Busy,
                 last_seen: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_millis() as u64)
@@ -428,6 +426,13 @@ async fn handle_message(
                 }
             } else {
                 log::warn!("No viewer session found for {}", remote_ip);
+                streaming::store_pending_screen_start(
+                    remote_ip,
+                    *width,
+                    *height,
+                    *fps,
+                    codec.clone(),
+                );
             }
         }
 

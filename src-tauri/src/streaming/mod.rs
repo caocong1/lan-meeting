@@ -498,9 +498,20 @@ impl ViewerSession {
 static VIEWER_SESSIONS: once_cell::sync::Lazy<Arc<RwLock<HashMap<String, ViewerSession>>>> =
     once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+static PENDING_SCREEN_STARTS: once_cell::sync::Lazy<
+    Arc<RwLock<HashMap<String, (u32, u32, u8, String)>>>,
+> = once_cell::sync::Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
 /// Get viewer sessions
 pub fn get_viewer_sessions() -> Arc<RwLock<HashMap<String, ViewerSession>>> {
     VIEWER_SESSIONS.clone()
+}
+
+/// Store ScreenStart metadata when it arrives before the user opens a viewer.
+pub fn store_pending_screen_start(peer_ip: String, width: u32, height: u32, fps: u8, codec: String) {
+    PENDING_SCREEN_STARTS
+        .write()
+        .insert(peer_ip, (width, height, fps, codec));
 }
 
 /// Create a viewer session for a peer (window created on ScreenStart)
@@ -508,7 +519,13 @@ pub fn create_viewer_session(
     peer_ip: String,
     peer_name: String,
 ) -> Result<(), StreamingError> {
-    let session = ViewerSession::new(peer_ip.clone(), peer_name)?;
+    let mut session = ViewerSession::new(peer_ip.clone(), peer_name)?;
+
+    if let Some((width, height, fps, codec)) = PENDING_SCREEN_STARTS.write().remove(&peer_ip) {
+        log::info!("Applying pending ScreenStart for {}", peer_ip);
+        session.handle_screen_start(width, height, fps, &codec)?;
+    }
+
     VIEWER_SESSIONS.write().insert(peer_ip, session);
     Ok(())
 }

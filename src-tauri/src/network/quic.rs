@@ -571,19 +571,25 @@ pub fn cleanup_dead_connections() -> Vec<String> {
         }
     }
 
-    // Remove devices whose IP matches a dead connection and emit events
+    // Keep mDNS-discovered devices visible when a QUIC connection dies.
+    // The device can be reconnected without waiting for a fresh mDNS event.
     {
         use super::discovery;
         let devices = discovery::get_devices();
         for device in &devices {
             if dead_ips.contains(&device.ip) {
-                log::info!("Removing device '{}' (ip={}) due to dead connection", device.name, device.ip);
-                discovery::remove_device(&device.id);
+                log::info!("Marking device '{}' (ip={}) online after dead connection", device.name, device.ip);
+                discovery::update_device_status(&device.id, discovery::DeviceStatus::Online);
 
                 // Notify frontend
                 if let Some(app) = crate::APP_HANDLE.get() {
                     use tauri::Emitter;
-                    let _ = app.emit("device-removed", &device.id);
+                    if let Some(updated) = discovery::get_devices()
+                        .into_iter()
+                        .find(|d| d.id == device.id)
+                    {
+                        let _ = app.emit("device-discovered", &updated);
+                    }
                 }
             }
         }

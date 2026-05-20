@@ -288,7 +288,22 @@ pub fn get_devices() -> Vec<DiscoveredDevice> {
 /// Add or update a device
 pub fn add_device(device: DiscoveredDevice) {
     let mut devices = DEVICES.write();
-    devices.insert(device.id.clone(), device);
+    if let Some(existing) = devices.get_mut(&device.id) {
+        existing.name = device.name;
+        existing.ip = device.ip;
+        existing.port = device.port;
+        existing.last_seen = device.last_seen;
+
+        if device.status != DeviceStatus::Online || existing.status == DeviceStatus::Offline {
+            existing.status = device.status;
+        }
+
+        if device.is_sharing || !existing.is_sharing {
+            existing.is_sharing = device.is_sharing;
+        }
+    } else {
+        devices.insert(device.id.clone(), device);
+    }
 }
 
 /// Remove a device
@@ -310,6 +325,19 @@ pub fn update_device_status(id: &str, status: DeviceStatus) {
         device.status = status;
         device.last_seen = now_ms();
     }
+}
+
+/// Update device connection status by IP
+pub fn update_device_status_by_ip(ip: &str, status: DeviceStatus) -> Option<DiscoveredDevice> {
+    let mut devices = DEVICES.write();
+    for device in devices.values_mut() {
+        if device.ip == ip {
+            device.status = status;
+            device.last_seen = now_ms();
+            return Some(device.clone());
+        }
+    }
+    None
 }
 
 /// Update device sharing status
