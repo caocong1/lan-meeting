@@ -309,7 +309,40 @@ fn sample_to_frame(
         .unwrap_or(timestamp);
 
     match config.output_format {
-        OutputFormat::BGRA => Ok(DecodedFrame::bgra(width, height, ts, map.to_vec())),
+        OutputFormat::BGRA => {
+            let stride = usize::try_from(video_info.stride()[0])
+                .map_err(|_| DecoderError::DecodeError("Invalid BGRA stride".into()))?;
+            let row_bytes = width as usize * 4;
+            let height_usize = height as usize;
+
+            let data = if stride == row_bytes && map.len() == row_bytes * height_usize {
+                map.to_vec()
+            } else {
+                log::debug!(
+                    "Repacking BGRA frame from stride {} to row bytes {}",
+                    stride,
+                    row_bytes
+                );
+                let mut packed = vec![0u8; row_bytes * height_usize];
+                for row in 0..height_usize {
+                    let src_start = row * stride;
+                    let src_end = src_start + row_bytes;
+                    let dst_start = row * row_bytes;
+                    if src_end > map.len() {
+                        return Err(DecoderError::DecodeError(format!(
+                            "BGRA frame buffer too small: need {}, got {}",
+                            src_end,
+                            map.len()
+                        )));
+                    }
+                    packed[dst_start..dst_start + row_bytes]
+                        .copy_from_slice(&map[src_start..src_end]);
+                }
+                packed
+            };
+
+            Ok(DecodedFrame::bgra(width, height, ts, data))
+        }
         OutputFormat::YUV420 => {
             let strides = [
                 video_info.stride()[0] as usize,

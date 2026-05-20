@@ -209,9 +209,9 @@ impl StreamingManager {
             let mut last_raw_frame: Option<Vec<u8>> = None;
             let mut timeout_count: u32 = 0;
 
-            // Frame send bookkeeping. Frames currently use short streams for
-            // reliable delivery across macOS and Windows/Parallels; keep the
-            // map available for cleanup and future persistent-stream tuning.
+            // Frame send bookkeeping. Keep one long-lived QUIC stream per
+            // active viewer so the receiver can continuously read frames from
+            // the stream it already accepted.
             let mut peer_streams: HashMap<String, crate::network::quic::QuicStream> = HashMap::new();
 
             loop {
@@ -688,18 +688,19 @@ pub async fn request_screen_stream(peer_ip: &str, display_id: u32) -> Result<(),
     Ok(())
 }
 
-/// Send frame data to all peers.
+/// Send frame data to active viewers.
 ///
-/// Control messages already use a short stream and finish the send side, and
-/// that path has been reliable across macOS and Windows/Parallels. Use the
-/// same framing for screen frames so the receiver can accept and process each
-/// frame independently.
+/// Control messages use short streams. Screen frames use a persistent stream
+/// per viewer because opening and finishing a stream for every frame can make
+/// the sender report success while the receiver never catches up accepting the
+/// frame streams on Windows/Parallels.
 async fn broadcast_frame(
     data: &[u8],
-    _peer_streams: &mut HashMap<String, QuicStream>,
+    peer_streams: &mut HashMap<String, QuicStream>,
 ) -> usize {
     let connections = quic::get_all_connections();
     let mut sent_count = 0usize;
+    let mut active_keys = HashSet::new();
 
     for conn in &connections {
         if !conn.is_alive() {
@@ -712,25 +713,45 @@ async fn broadcast_frame(
         }
 
         let key = conn.remote_addr().to_string();
-        let mut stream = match conn.open_bi_stream().await {
-            Ok(stream) => stream,
-            Err(e) => {
-                log::warn!("Failed to open frame stream to {}: {}", key, e);
-                continue;
+        active_keys.insert(key.clone());
+
+        let mut stream = if let Some(stream) = peer_streams.remove(&key) {
+            stream
+        } else {
+            match conn.open_bi_stream().await {
+                Ok(stream) => {
+                    log::info!("Opened persistent frame stream to {}", key);
+                    stream
+                }
+                Err(e) => {
+                    log::warn!("Failed to open frame stream to {}: {}", key, e);
+                    continue;
+                }
             }
         };
 
-        if let Err(e) = stream.send_framed(data).await {
-            log::warn!("Failed to send frame to {}: {}", key, e);
-            continue;
+        match stream.send_framed(data).await {
+            Ok(()) => {
+                sent_count += 1;
+                peer_streams.insert(key, stream);
+            }
+            Err(e) => {
+                log::warn!("Failed to send frame to {}: {}", key, e);
+                let _ = stream.finish().await;
+            }
         }
+    }
 
-        if let Err(e) = stream.finish().await {
-            log::warn!("Failed to finish frame stream to {}: {}", key, e);
-            continue;
+    let stale_keys: Vec<String> = peer_streams
+        .keys()
+        .filter(|key| !active_keys.contains(*key))
+        .cloned()
+        .collect();
+    for key in stale_keys {
+        if let Some(mut stream) = peer_streams.remove(&key) {
+            log::debug!("Closing stale frame stream to {}", key);
+            let _ = stream.finish().await;
         }
-
-        sent_count += 1;
     }
 
     sent_count
