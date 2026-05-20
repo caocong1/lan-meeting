@@ -6,6 +6,7 @@ use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
@@ -54,6 +55,12 @@ static MDNS_DAEMON: once_cell::sync::Lazy<Option<ServiceDaemon>> =
             None
         }
     });
+
+/// Full name of our registered mDNS service (for unregister on stop)
+static REGISTERED_SERVICE_FULLNAME: RwLock<Option<String>> = RwLock::new(None);
+
+/// Whether the browse event loop is already running
+static BROWSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Get our device ID
 pub fn get_our_device_id() -> &'static str {
@@ -140,19 +147,28 @@ fn register_service(daemon: &ServiceDaemon) -> Result<(), NetworkError> {
     // when network interfaces change (e.g., VPN connect/disconnect)
     .enable_addr_auto();
 
+    let fullname = service_info.get_fullname().to_string();
+
     daemon
         .register(service_info)
         .map_err(|e| NetworkError::DiscoveryError(format!("Failed to register service: {}", e)))?;
 
+    *REGISTERED_SERVICE_FULLNAME.write() = Some(fullname);
     log::info!("mDNS service registered successfully");
     Ok(())
 }
 
 /// Browse for other services on the network
 fn browse_services(daemon: &ServiceDaemon, app: AppHandle) -> Result<(), NetworkError> {
+    if BROWSE_ACTIVE.swap(true, Ordering::SeqCst) {
+        log::debug!("mDNS browse already active, skipping");
+        return Ok(());
+    }
+
     log::info!("Browsing for LAN Meeting services...");
 
     let receiver = daemon.browse(SERVICE_TYPE).map_err(|e| {
+        BROWSE_ACTIVE.store(false, Ordering::SeqCst);
         NetworkError::DiscoveryError(format!("Failed to start browsing: {}", e))
     })?;
 
@@ -423,8 +439,32 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
     Ok(device)
 }
 
-/// Shutdown mDNS service
+/// Unregister our mDNS service so the daemon can be reused on restart
+pub fn stop_advertising() {
+    let fullname = REGISTERED_SERVICE_FULLNAME.write().take();
+    let Some(fullname) = fullname else {
+        return;
+    };
+
+    let Some(daemon) = MDNS_DAEMON.as_ref() else {
+        return;
+    };
+
+    match daemon.unregister(&fullname) {
+        Ok(receiver) => {
+            if let Ok(status) = receiver.recv() {
+                log::info!("mDNS service unregistered: {:?}", status);
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to unregister mDNS service {}: {}", fullname, e);
+        }
+    }
+}
+
+/// Shutdown mDNS daemon entirely (app exit only)
 pub fn shutdown() {
+    stop_advertising();
     if let Some(daemon) = MDNS_DAEMON.as_ref() {
         let _ = daemon.shutdown();
     }

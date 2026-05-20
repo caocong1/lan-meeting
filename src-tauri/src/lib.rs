@@ -15,18 +15,30 @@ pub mod transfer;
 
 use network::quic::QuicEndpoint;
 use once_cell::sync::OnceCell;
+use parking_lot::RwLock;
 use std::sync::Arc;
 use tauri::Emitter;
 
-/// Global QUIC endpoint
-pub static QUIC_ENDPOINT: OnceCell<Arc<QuicEndpoint>> = OnceCell::new();
+/// Global QUIC endpoint (replaced on each service start/stop cycle)
+pub static QUIC_ENDPOINT: once_cell::sync::Lazy<RwLock<Option<Arc<QuicEndpoint>>>> =
+    once_cell::sync::Lazy::new(|| RwLock::new(None));
 
 /// Global Tauri app handle for emitting events
 pub static APP_HANDLE: OnceCell<tauri::AppHandle> = OnceCell::new();
 
 /// Get the global QUIC endpoint
-pub fn get_quic_endpoint() -> Option<&'static Arc<QuicEndpoint>> {
-    QUIC_ENDPOINT.get()
+pub fn get_quic_endpoint() -> Option<Arc<QuicEndpoint>> {
+    QUIC_ENDPOINT.read().clone()
+}
+
+/// Store the global QUIC endpoint
+pub fn set_quic_endpoint(endpoint: Arc<QuicEndpoint>) {
+    *QUIC_ENDPOINT.write() = Some(endpoint);
+}
+
+/// Remove and return the global QUIC endpoint so the listen port is released
+pub fn take_quic_endpoint() -> Option<Arc<QuicEndpoint>> {
+    QUIC_ENDPOINT.write().take()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

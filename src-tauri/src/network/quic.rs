@@ -246,6 +246,22 @@ impl QuicEndpoint {
     pub fn close(&self) {
         self.endpoint.close(0u32.into(), b"shutdown");
     }
+
+    /// Wait until all connections are closed and the socket can be rebound
+    pub async fn wait_idle(&self) {
+        self.endpoint.wait_idle().await;
+    }
+}
+
+/// Close every active peer connection and clear the registry
+pub fn close_all_connections() {
+    let conn_ids: Vec<String> = CONNECTIONS.read().keys().cloned().collect();
+    for conn_id in conn_ids {
+        if let Some(conn) = get_connection(&conn_id) {
+            conn.close();
+        }
+        remove_connection(&conn_id);
+    }
 }
 
 /// Active QUIC connection to a peer

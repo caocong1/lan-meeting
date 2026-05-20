@@ -623,8 +623,8 @@ pub async fn start_service(app_handle: tauri::AppHandle) -> Result<(), String> {
             let endpoint = Arc::new(endpoint);
             log::info!("QUIC endpoint initialized on {}", endpoint.local_addr());
 
-            // Store globally
-            let _ = crate::QUIC_ENDPOINT.set(endpoint.clone());
+            // Store globally (replaces any previous endpoint)
+            crate::set_quic_endpoint(endpoint.clone());
 
             // Start accepting connections
             endpoint.start_server(|conn| {
@@ -667,17 +667,19 @@ pub async fn stop_service() -> Result<(), String> {
     // Disconnect all peers
     disconnect(None).await?;
 
-    // Close QUIC endpoint
-    if let Some(endpoint) = crate::QUIC_ENDPOINT.get() {
+    // Close QUIC endpoint and release the listen port
+    if let Some(endpoint) = crate::take_quic_endpoint() {
+        quic::close_all_connections();
         endpoint.close();
+        endpoint.wait_idle().await;
         log::info!("QUIC endpoint closed");
     }
 
     // Clear device list
     discovery::clear_devices();
 
-    // Shutdown mDNS
-    discovery::shutdown();
+    // Unregister mDNS service but keep the daemon alive for restart
+    discovery::stop_advertising();
 
     *SERVICE_RUNNING.write() = false;
 
