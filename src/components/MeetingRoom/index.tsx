@@ -9,6 +9,7 @@ interface DeviceInfo {
   name: string;
   ip: string;
   port: number;
+  status?: "online" | "busy" | "offline";
   is_sharing: boolean;
 }
 
@@ -17,6 +18,7 @@ interface Member {
   name: string;
   ip: string;
   port: number;
+  status?: "online" | "busy" | "offline";
   is_self: boolean;
   is_sharing: boolean;
 }
@@ -34,6 +36,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
   const [isLoadingMembers, setIsLoadingMembers] = createSignal(true);
   const [showAddModal, setShowAddModal] = createSignal(false);
   const [error, setError] = createSignal<string | null>(null);
+  const [connectingIds, setConnectingIds] = createSignal<Set<string>>(new Set());
 
   let unlistenDiscovered: UnlistenFn | undefined;
   let unlistenRemoved: UnlistenFn | undefined;
@@ -49,6 +52,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
         name: d.name,
         ip: d.ip,
         port: d.port,
+        status: d.status,
         is_self: false,
         is_sharing: d.is_sharing || false,
       }));
@@ -59,6 +63,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
           name: props.selfInfo.name + " (me)",
           ip: props.selfInfo.ip,
           port: 19876,
+          status: "busy",
           is_self: true,
           is_sharing: isSharing(),
         });
@@ -81,6 +86,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
           ...m,
           name: device.name,
           ip: device.ip,
+          status: device.status,
           is_sharing: device.is_sharing || false,
         } : m);
       }
@@ -89,6 +95,7 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
         name: device.name,
         ip: device.ip,
         port: device.port,
+        status: device.status,
         is_self: false,
         is_sharing: device.is_sharing || false,
       }];
@@ -157,6 +164,29 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
     }
   };
 
+  const handleConnectDevice = async (member: Member) => {
+    if (connectingIds().has(member.id)) {
+      return;
+    }
+
+    setConnectingIds(prev => new Set(prev).add(member.id));
+    setError(null);
+
+    try {
+      await invoke("connect_to_device", { deviceId: member.id });
+      await fetchMembers();
+    } catch (e) {
+      console.error("Failed to connect to device:", e);
+      setError(`连接失败: ${e}`);
+    } finally {
+      setConnectingIds(prev => {
+        const next = new Set(prev);
+        next.delete(member.id);
+        return next;
+      });
+    }
+  };
+
   const handleRequestControl = async (member: Member) => {
     try {
       await invoke("request_control", { peerId: member.id });
@@ -165,6 +195,8 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
       setError(`请求控制失败: ${e}`);
     }
   };
+
+  const isConnected = (member: Member) => member.status === "busy";
 
   onMount(async () => {
     unlistenDiscovered = await listen<DeviceInfo>("device-discovered", (event) => {
@@ -333,6 +365,24 @@ export const MeetingRoom: Component<MeetingRoomProps> = (props) => {
                     ) : (
                       <div class="flex items-center gap-2">
                         <span class="text-sm text-gray-400">未共享</span>
+                        {!member.is_self && (
+                          isConnected(member) ? (
+                            <button
+                              class="px-3 py-1.5 bg-primary-500 hover:bg-primary-600 text-white text-sm rounded-lg"
+                              onClick={() => handleWatchScreen(member)}
+                            >
+                              观看
+                            </button>
+                          ) : (
+                            <button
+                              class="px-3 py-1.5 border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                              onClick={() => handleConnectDevice(member)}
+                              disabled={connectingIds().has(member.id)}
+                            >
+                              {connectingIds().has(member.id) ? "连接中..." : "连接"}
+                            </button>
+                          )
+                        )}
                       </div>
                     )}
                   </div>

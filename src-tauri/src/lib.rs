@@ -273,6 +273,11 @@ async fn handle_message(
             stream.send_framed(&encoded).await?;
 
             log::info!("Handshake accepted from {}, sent acknowledgment", name);
+
+            let peer_ip = remote_addr.ip().to_string();
+            if let Err(e) = commands::send_current_sharing_status_to_peer(&peer_ip).await {
+                log::warn!("Failed to send current sharing status to {}: {}", peer_ip, e);
+            }
         }
 
         Message::HandshakeAck {

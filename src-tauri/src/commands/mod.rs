@@ -210,6 +210,15 @@ pub async fn connect_to_device(device_id: String) -> Result<(), String> {
         protocol::Message::HandshakeAck { accepted, reason, name, .. } => {
             if accepted {
                 log::info!("Connection accepted by {}", name);
+                let conn_clone = conn.clone();
+                tokio::spawn(async move {
+                    crate::handle_incoming_connection(conn_clone).await;
+                });
+
+                if let Err(e) = send_current_sharing_status_to_peer(&device.ip).await {
+                    log::warn!("Failed to send current sharing status to {}: {}", device.ip, e);
+                }
+
                 Ok(())
             } else {
                 let err_msg = reason.unwrap_or_else(|| "Unknown reason".to_string());
@@ -818,6 +827,46 @@ pub fn get_default_streaming_indices() -> (usize, usize) {
 /// Sharing state
 static IS_SHARING: once_cell::sync::Lazy<parking_lot::RwLock<bool>> =
     once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(false));
+
+/// Send our current sharing state to a single peer.
+pub async fn send_current_sharing_status_to_peer(peer_ip: &str) -> Result<(), String> {
+    use crate::network::protocol;
+
+    let is_sharing = *IS_SHARING.read();
+    let displays = if is_sharing {
+        match get_displays().await {
+            Ok(displays) if !displays.is_empty() => displays
+                .into_iter()
+                .map(|d| protocol::DisplayInfo {
+                    id: d.id,
+                    name: d.name,
+                    width: d.width,
+                    height: d.height,
+                    primary: d.primary,
+                })
+                .collect(),
+            Ok(_) | Err(_) => vec![protocol::DisplayInfo {
+                id: 0,
+                name: "Shared screen".to_string(),
+                width: 0,
+                height: 0,
+                primary: true,
+            }],
+        }
+    } else {
+        vec![]
+    };
+
+    let msg = protocol::Message::ScreenOffer { displays };
+    let encoded = protocol::encode(&msg)
+        .map_err(|e| format!("Failed to encode sharing status: {}", e))?;
+
+    quic::send_to_peer(peer_ip, &encoded)
+        .await
+        .map_err(|e| format!("Failed to send sharing status: {}", e))?;
+
+    Ok(())
+}
 
 /// Broadcast sharing status to all connected peers
 #[tauri::command]
