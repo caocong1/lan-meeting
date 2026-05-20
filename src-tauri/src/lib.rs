@@ -469,6 +469,14 @@ async fn handle_message(
 
         Message::ScreenFrame { timestamp, frame_type: _, sequence, data } => {
             let remote_ip = _conn.remote_addr().ip().to_string();
+            if *sequence < 5 || *sequence % 50 == 0 {
+                log::info!(
+                    "Received screen frame {} from {} ({} bytes)",
+                    sequence,
+                    remote_ip,
+                    data.len()
+                );
+            }
 
             // Decode and render frame in native window (no Tauri event overhead)
             let sessions = streaming::get_viewer_sessions();
@@ -482,8 +490,19 @@ async fn handle_message(
                         if *sequence % 100 == 0 {
                             log::warn!("Frame {} decode error: {}", sequence, e);
                         }
+                    } else if *sequence < 5 || *sequence % 50 == 0 {
+                        log::info!(
+                            "Screen frame {} processed for {} (rendered frames={})",
+                            sequence,
+                            remote_ip,
+                            session.frame_count()
+                        );
                     }
+                } else if *sequence < 5 || *sequence % 50 == 0 {
+                    log::warn!("Frame {} received but viewer session is inactive", sequence);
                 }
+            } else if *sequence < 5 || *sequence % 50 == 0 {
+                log::warn!("Frame {} received but no viewer session for {}", sequence, remote_ip);
             }
 
             // Drop lock before any other operations

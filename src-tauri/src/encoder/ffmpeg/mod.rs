@@ -374,6 +374,7 @@ impl VideoEncoder for FfmpegEncoder {
         // Send frame to encoder
         encoder.send_frame(&frame)
             .map_err(|e| EncoderError::EncodeError(format!("Failed to send frame: {}", e)))?;
+        self.pts += 1;
 
         // Receive encoded packet
         let mut packet = Packet::empty();
@@ -402,7 +403,6 @@ impl VideoEncoder for FfmpegEncoder {
 
         let size = encoded_data.len();
         self.frame_count += 1;
-        self.pts += 1;
 
         Ok(EncodedFrame {
             data: encoded_data,

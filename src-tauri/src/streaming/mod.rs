@@ -3,6 +3,7 @@
 
 use crate::capture::ScreenCapture;
 use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
+use crate::encoder::scaler::FrameScaler;
 use crate::encoder::{EncoderConfig, EncoderPreset, FrameType};
 use crate::network::protocol::{self, Message};
 use crate::network::quic::{self, QuicStream};
@@ -128,13 +129,19 @@ impl StreamingManager {
             .start(config.display_id)
             .map_err(|e| StreamingError::CaptureError(e.to_string()))?;
 
+        // Downscale before encoding so all encoders see a predictable, decoder-friendly size.
+        // High-DPI Windows screens can exceed hardware decoder limits and cause black viewers.
+        let pre_scaler = FrameScaler::new_with_target(self.width, self.height, 1920, 1080);
+        let target_width = pre_scaler.dst_width;
+        let target_height = pre_scaler.dst_height;
+
         // Create encoder
         let mut encoder = crate::encoder::create_encoder()
             .map_err(|e| StreamingError::EncoderError(e.to_string()))?;
 
         let encoder_config = EncoderConfig {
-            width: self.width,
-            height: self.height,
+            width: target_width,
+            height: target_height,
             fps: config.fps,
             bitrate: config.quality.bitrate(),
             max_bitrate: config.quality.bitrate() * 2,
@@ -152,8 +159,10 @@ impl StreamingManager {
             .unwrap_or((self.width, self.height));
 
         log::info!(
-            "Encoder initialized: {} ({}x{} @ {} fps)",
+            "Encoder initialized: {} ({}x{} -> {}x{} @ {} fps)",
             encoder.info(),
+            self.width,
+            self.height,
             encode_width,
             encode_height,
             config.fps
@@ -230,13 +239,20 @@ impl StreamingManager {
                     .unwrap_or(0);
 
                 // Encode frame
-                let encoded = match encoder.encode(&frame.data, timestamp) {
+                let scaled_frame = pre_scaler.scale(&frame.data);
+                let encoded = match encoder.encode(&scaled_frame, timestamp) {
                     Ok(e) => e,
                     Err(e) => {
                         log::warn!("Encode error: {}", e);
                         continue;
                     }
                 };
+                if encoded.data.is_empty() {
+                    if sequence < 5 || sequence % 100 == 0 {
+                        log::debug!("Encoder returned empty packet at frame {}", sequence);
+                    }
+                    continue;
+                }
 
                 // Create ScreenFrame message
                 let frame_msg = Message::ScreenFrame {
@@ -250,8 +266,18 @@ impl StreamingManager {
                 };
 
                 // Send to all connected peers using persistent streams
+                let mut sent_count = 0usize;
                 if let Ok(encoded_msg) = protocol::encode(&frame_msg) {
-                    broadcast_frame(&encoded_msg, &mut peer_streams).await;
+                    sent_count = broadcast_frame(&encoded_msg, &mut peer_streams).await;
+                }
+                if sequence < 5 || sequence % 50 == 0 {
+                    log::info!(
+                        "Streaming frame {}: {} bytes ({:?}) sent to {} peers",
+                        sequence,
+                        encoded.size,
+                        encoded.frame_type,
+                        sent_count
+                    );
                 }
 
                 sequence = sequence.wrapping_add(1);
@@ -566,11 +592,12 @@ pub async fn request_screen_stream(peer_ip: &str, display_id: u32) -> Result<(),
 async fn broadcast_frame(
     data: &[u8],
     peer_streams: &mut HashMap<String, QuicStream>,
-) {
+) -> usize {
     let connections = quic::get_all_connections();
 
     // Track which peers we successfully sent to
     let mut failed_peers: Vec<String> = Vec::new();
+    let mut sent_count = 0usize;
 
     for conn in &connections {
         if !conn.is_alive() {
@@ -597,6 +624,8 @@ async fn broadcast_frame(
             if let Err(e) = stream.send_framed(data).await {
                 log::warn!("Failed to send frame to {}: {}, will reopen stream", key, e);
                 failed_peers.push(key);
+            } else {
+                sent_count += 1;
             }
         }
     }
@@ -612,4 +641,5 @@ async fn broadcast_frame(
         .map(|c| c.remote_addr().to_string())
         .collect();
     peer_streams.retain(|key, _| active_keys.contains(key));
+    sent_count
 }
