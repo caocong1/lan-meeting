@@ -7,6 +7,7 @@ license = "MIT"
 repository = ""
 edition = "2024"
 rust-version = "1.85"
+default-run = "lan-meeting"
 
 [lib]
 name = "lan_meeting_lib"
@@ -55,12 +56,12 @@ openh264 = "0.6"           # Cisco OpenH264 software encoder (fallback)
 lz4_flex = "0.11"          # Fast compression for raw frames
 
 # Hardware-accelerated video codecs
-ffmpeg-next = "8.1"        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
+ffmpeg-next = { version = "8.1", optional = true }        # FFmpeg bindings for hardware encoding (NVENC/VideoToolbox/VAAPI)
 
 # GStreamer hardware video decoding (cross-platform, Vulkan/D3D11/VideoToolbox/VAAPI)
-gstreamer = "0.24"
-gstreamer-video = "0.24"
-gstreamer-app = "0.24"
+gstreamer = { version = "0.24", optional = true }
+gstreamer-video = { version = "0.24", optional = true }
+gstreamer-app = { version = "0.24", optional = true }
 
 # Utilities
 thiserror = "2"
@@ -114,7 +115,9 @@ wayland-client = { version = "0.31", optional = true }
 x11rb = { version = "0.13", optional = true }
 
 [features]
-default = []
+default = ["media-ffmpeg", "media-gstreamer"]
+media-ffmpeg = ["dep:ffmpeg-next"]
+media-gstreamer = ["dep:gstreamer", "dep:gstreamer-video", "dep:gstreamer-app"]
 # Linux-specific features
 pipewire = ["dep:pipewire"]
 wayland = ["dep:wayland-client"]

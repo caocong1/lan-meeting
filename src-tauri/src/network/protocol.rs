@@ -220,17 +220,9 @@ pub enum InputEventType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InputData {
-    Mouse {
-        button: MouseButton,
-    },
-    Scroll {
-        delta_x: f32,
-        delta_y: f32,
-    },
-    Key {
-        key_code: u32,
-        modifiers: Modifiers,
-    },
+    Mouse { button: MouseButton },
+    Scroll { delta_x: f32, delta_y: f32 },
+    Key { key_code: u32, modifiers: Modifiers },
     None,
 }
 
@@ -394,7 +386,9 @@ impl MessageCodec {
             } else {
                 self.buffer.clear();
             }
-            return Err(NetworkError::ProtocolError("Invalid magic bytes".to_string()));
+            return Err(NetworkError::ProtocolError(
+                "Invalid magic bytes".to_string(),
+            ));
         }
 
         // Get payload length
@@ -428,9 +422,7 @@ impl MessageCodec {
 
     /// Find the next magic bytes in the buffer
     fn find_magic(&self) -> Option<usize> {
-        self.buffer
-            .windows(2)
-            .position(|w| w == MAGIC)
+        self.buffer.windows(2).position(|w| w == MAGIC)
     }
 
     /// Encode a message and return the bytes
@@ -465,7 +457,12 @@ pub fn create_handshake(device_id: &str, name: &str) -> Message {
 }
 
 /// Create a handshake acknowledgment
-pub fn create_handshake_ack(device_id: &str, name: &str, accepted: bool, reason: Option<String>) -> Message {
+pub fn create_handshake_ack(
+    device_id: &str,
+    name: &str,
+    accepted: bool,
+    reason: Option<String>,
+) -> Message {
     Message::HandshakeAck {
         device_id: device_id.to_string(),
         name: name.to_string(),

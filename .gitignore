@@ -7,6 +7,7 @@ node_modules-windows
 # output
 out
 dist
+artifacts/
 *.tgz
 
 # code coverage

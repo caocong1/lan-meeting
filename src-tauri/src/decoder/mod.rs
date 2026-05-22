@@ -6,8 +6,10 @@
 // 2. Platform-specific hardware (VideoToolbox/DXVA/VAAPI)
 // 3. OpenH264 software decoder
 
-pub mod gstreamer;
 pub mod software;
+
+#[cfg(feature = "media-gstreamer")]
+pub mod gstreamer;
 
 #[cfg(target_os = "macos")]
 pub mod videotoolbox;
@@ -93,7 +95,10 @@ impl DecodedFrame {
             height,
             timestamp,
             format: OutputFormat::BGRA,
-            data: DecodedFrameData::Cpu { data, strides: None },
+            data: DecodedFrameData::Cpu {
+                data,
+                strides: None,
+            },
         }
     }
 
@@ -145,7 +150,8 @@ pub trait VideoDecoder: Send + Sync {
     fn init(&mut self, config: DecoderConfig) -> Result<(), DecoderError>;
 
     /// Decode H.264 NAL units
-    fn decode(&mut self, data: &[u8], timestamp: u64) -> Result<Option<DecodedFrame>, DecoderError>;
+    fn decode(&mut self, data: &[u8], timestamp: u64)
+    -> Result<Option<DecodedFrame>, DecoderError>;
 
     /// Flush any buffered frames
     fn flush(&mut self) -> Result<Vec<DecodedFrame>, DecoderError>;
@@ -169,12 +175,15 @@ pub fn create_decoder() -> Result<Box<dyn VideoDecoder>, DecoderError> {
     }
 
     // Try GStreamer first (cross-platform, auto-selects best hardware decoder)
-    match gstreamer::GStreamerDecoder::new() {
-        Ok(dec) => {
-            log::info!("Using GStreamer decoder (auto hardware selection)");
-            return Ok(Box::new(dec));
+    #[cfg(feature = "media-gstreamer")]
+    {
+        match gstreamer::GStreamerDecoder::new() {
+            Ok(dec) => {
+                log::info!("Using GStreamer decoder (auto hardware selection)");
+                return Ok(Box::new(dec));
+            }
+            Err(e) => log::warn!("GStreamer decoder not available: {}", e),
         }
-        Err(e) => log::warn!("GStreamer decoder not available: {}", e),
     }
 
     // Try platform-specific hardware decoders as fallback

@@ -2,10 +2,10 @@
 // Uses winit for window management on Windows/Linux,
 // and native AppKit window on macOS (winit requires main thread on macOS)
 
-use super::{wgpu_renderer::WgpuRenderer, FrameFormat, RenderFrame, RendererError};
+use super::{FrameFormat, RenderFrame, RendererError, wgpu_renderer::WgpuRenderer};
 use crossbeam_channel::{Receiver, Sender};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(not(target_os = "macos"))]
 use winit::{
@@ -203,9 +203,7 @@ impl RenderWindow {
         // Wait for main thread to create the window
         let (ns_view, _ns_window) = result_rx
             .recv()
-            .map_err(|e| {
-                RendererError::WindowError(format!("Main thread channel closed: {}", e))
-            })?
+            .map_err(|e| RendererError::WindowError(format!("Main thread channel closed: {}", e)))?
             .map_err(|e| RendererError::WindowError(format!("NSWindow creation failed: {}", e)))?;
 
         log::debug!("NSWindow created on main thread, starting render thread");
@@ -225,7 +223,12 @@ impl RenderWindow {
         let window_addr_for_toolbar = ns_window_addr;
         app_handle
             .run_on_main_thread(move || {
-                let result = create_toolbar_panel(window_addr_for_toolbar, width, default_res_idx, default_br_idx);
+                let result = create_toolbar_panel(
+                    window_addr_for_toolbar,
+                    width,
+                    default_res_idx,
+                    default_br_idx,
+                );
                 let _ = toolbar_tx.send(result);
             })
             .map_err(|e| {
@@ -234,12 +237,14 @@ impl RenderWindow {
 
         let (toolbar_panel_addr, res_popup_addr, br_popup_addr) = toolbar_rx
             .recv()
-            .map_err(|e| {
-                RendererError::WindowError(format!("Toolbar channel closed: {}", e))
-            })?
+            .map_err(|e| RendererError::WindowError(format!("Toolbar channel closed: {}", e)))?
             .map_err(|e| RendererError::WindowError(format!("Toolbar creation failed: {}", e)))?;
 
-        log::debug!("Floating toolbar panel created on main thread (res={}, br={})", default_res_idx, default_br_idx);
+        log::debug!(
+            "Floating toolbar panel created on main thread (res={}, br={})",
+            default_res_idx,
+            default_br_idx
+        );
 
         // Create wgpu Instance + Surface on main thread
         // (Metal's get_metal_layer MUST be called on the UI thread)
@@ -248,48 +253,41 @@ impl RenderWindow {
 
         app_handle
             .run_on_main_thread(move || {
-                let result =
-                    (|| -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
-                        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-                            backends: wgpu::Backends::METAL,
-                            ..Default::default()
-                        });
+                let result = (|| -> Result<(wgpu::Instance, wgpu::Surface<'static>), String> {
+                    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                        backends: wgpu::Backends::METAL,
+                        ..Default::default()
+                    });
 
-                        let ns_view_ptr =
-                            std::ptr::NonNull::new(ns_view_addr as *mut std::ffi::c_void)
-                                .ok_or_else(|| "NSView pointer was null".to_string())?;
+                    let ns_view_ptr = std::ptr::NonNull::new(ns_view_addr as *mut std::ffi::c_void)
+                        .ok_or_else(|| "NSView pointer was null".to_string())?;
 
-                        let surface = unsafe {
-                            let raw_display = raw_window_handle::RawDisplayHandle::AppKit(
-                                raw_window_handle::AppKitDisplayHandle::new(),
-                            );
-                            let raw_window = raw_window_handle::RawWindowHandle::AppKit(
-                                raw_window_handle::AppKitWindowHandle::new(ns_view_ptr),
-                            );
-                            instance
-                                .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-                                    raw_display_handle: raw_display,
-                                    raw_window_handle: raw_window,
-                                })
-                                .map_err(|e| format!("Failed to create surface: {}", e))?
-                        };
+                    let surface = unsafe {
+                        let raw_display = raw_window_handle::RawDisplayHandle::AppKit(
+                            raw_window_handle::AppKitDisplayHandle::new(),
+                        );
+                        let raw_window = raw_window_handle::RawWindowHandle::AppKit(
+                            raw_window_handle::AppKitWindowHandle::new(ns_view_ptr),
+                        );
+                        instance
+                            .create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
+                                raw_display_handle: raw_display,
+                                raw_window_handle: raw_window,
+                            })
+                            .map_err(|e| format!("Failed to create surface: {}", e))?
+                    };
 
-                        Ok((instance, surface))
-                    })();
+                    Ok((instance, surface))
+                })();
                 let _ = surface_tx.send(result);
             })
             .map_err(|e| {
-                RendererError::WindowError(format!(
-                    "Failed to dispatch surface creation: {}",
-                    e
-                ))
+                RendererError::WindowError(format!("Failed to dispatch surface creation: {}", e))
             })?;
 
         let (instance, surface) = surface_rx
             .recv()
-            .map_err(|e| {
-                RendererError::WindowError(format!("Surface channel closed: {}", e))
-            })?
+            .map_err(|e| RendererError::WindowError(format!("Surface channel closed: {}", e)))?
             .map_err(|e| RendererError::WindowError(format!("Surface creation failed: {}", e)))?;
 
         log::debug!("wgpu Surface created on main thread");
@@ -298,181 +296,195 @@ impl RenderWindow {
         let is_open_for_panic = is_open.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            log::debug!("macOS render thread started");
+                log::debug!("macOS render thread started");
 
-            // Initialize wgpu renderer with instance + surface created on main thread
-            log::info!("macOS render thread: initializing wgpu renderer...");
-            let renderer = pollster::block_on(async {
-                WgpuRenderer::new_with_raw_surface(instance, surface, width, height).await
-            });
+                // Initialize wgpu renderer with instance + surface created on main thread
+                log::info!("macOS render thread: initializing wgpu renderer...");
+                let renderer = pollster::block_on(async {
+                    WgpuRenderer::new_with_raw_surface(instance, surface, width, height).await
+                });
 
-            let mut renderer = match renderer {
-                Ok(r) => {
-                    log::info!("macOS render thread: renderer READY ({}x{})", width, height);
-                    r
-                }
-                Err(e) => {
-                    log::error!("macOS render thread: FAILED to create renderer: {}", e);
-                    is_open.store(false, Ordering::Relaxed);
-                    return;
-                }
-            };
+                let mut renderer = match renderer {
+                    Ok(r) => {
+                        log::info!("macOS render thread: renderer READY ({}x{})", width, height);
+                        r
+                    }
+                    Err(e) => {
+                        log::error!("macOS render thread: FAILED to create renderer: {}", e);
+                        is_open.store(false, Ordering::Relaxed);
+                        return;
+                    }
+                };
 
-            let mut current_format = FrameFormat::BGRA;
-            let mut check_counter: u32 = 0;
-            let mut render_frame_count: u32 = 0;
-            let mut last_surface_w: u32 = width;
-            let mut last_surface_h: u32 = height;
+                let mut current_format = FrameFormat::BGRA;
+                let mut check_counter: u32 = 0;
+                let mut render_frame_count: u32 = 0;
+                let mut last_surface_w: u32 = width;
+                let mut last_surface_h: u32 = height;
 
-            // Toolbar state (initialized from settings defaults)
-            let mut toolbar_visible = false;
-            let mut last_mouse_x: f64 = -1.0;
-            let mut last_mouse_y: f64 = -1.0;
-            let mut last_mouse_move_time = std::time::Instant::now();
-            let mut last_selected_resolution: isize = default_res_idx as isize;
-            let mut last_selected_bitrate: isize = default_br_idx as isize;
-            let toolbar_hide_delay = std::time::Duration::from_secs(3);
+                // Toolbar state (initialized from settings defaults)
+                let mut toolbar_visible = false;
+                let mut last_mouse_x: f64 = -1.0;
+                let mut last_mouse_y: f64 = -1.0;
+                let mut last_mouse_move_time = std::time::Instant::now();
+                let mut last_selected_resolution: isize = default_res_idx as isize;
+                let mut last_selected_bitrate: isize = default_br_idx as isize;
+                let toolbar_hide_delay = std::time::Duration::from_secs(3);
 
-            // Simple render loop (no winit event loop needed)
-            loop {
-                if !is_open.load(Ordering::Relaxed) {
-                    break;
-                }
+                // Simple render loop (no winit event loop needed)
+                loop {
+                    if !is_open.load(Ordering::Relaxed) {
+                        break;
+                    }
 
-                let mut has_new_frame = false;
+                    let mut has_new_frame = false;
 
-                // Process all pending commands - only keep the latest frame
-                let mut latest_frame: Option<RenderFrame> = None;
-                let mut stale_count: u32 = 0;
-                while let Ok(cmd) = command_rx.try_recv() {
-                    match cmd {
-                        WindowCommand::RenderFrame(frame) => {
-                            if latest_frame.is_some() {
-                                stale_count += 1;
+                    // Process all pending commands - only keep the latest frame
+                    let mut latest_frame: Option<RenderFrame> = None;
+                    let mut stale_count: u32 = 0;
+                    while let Ok(cmd) = command_rx.try_recv() {
+                        match cmd {
+                            WindowCommand::RenderFrame(frame) => {
+                                if latest_frame.is_some() {
+                                    stale_count += 1;
+                                }
+                                latest_frame = Some(frame);
                             }
-                            latest_frame = Some(frame);
+                            WindowCommand::SetTitle(_title) => {
+                                // TODO: dispatch to main thread to update NSWindow title
+                            }
+                            WindowCommand::Close => {
+                                is_open.store(false, Ordering::Relaxed);
+                                break;
+                            }
                         }
-                        WindowCommand::SetTitle(_title) => {
-                            // TODO: dispatch to main thread to update NSWindow title
+                    }
+
+                    // Upload only the latest frame, skip stale ones
+                    if let Some(frame) = latest_frame {
+                        current_format = frame.format;
+                        render_frame_count += 1;
+                        if stale_count > 0 {
+                            log::info!(
+                                "Render thread: dropped {} stale frames, rendering frame {}",
+                                stale_count,
+                                render_frame_count
+                            );
                         }
-                        WindowCommand::Close => {
+                        if let Err(e) = renderer.upload_frame(&frame) {
+                            log::error!("Render thread: Failed to upload frame: {}", e);
+                        }
+                        has_new_frame = true;
+                        if render_frame_count <= 5 || render_frame_count % 50 == 0 {
+                            log::info!(
+                                "Render thread: frame {} uploaded ({}x{}, {:?})",
+                                render_frame_count,
+                                frame.width,
+                                frame.height,
+                                frame.format
+                            );
+                        }
+                    }
+
+                    // Detect window resize by querying NSView backing size
+                    if has_new_frame {
+                        let (pixel_w, pixel_h) = unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+
+                            let view = ns_view_addr as *mut AnyObject;
+                            let window_ptr = ns_window_addr as *mut AnyObject;
+
+                            // Get logical bounds of the view
+                            let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
+                            // Get backing scale factor (Retina)
+                            let scale: f64 = msg_send![window_ptr, backingScaleFactor];
+
+                            let pw = (bounds.size.width * scale) as u32;
+                            let ph = (bounds.size.height * scale) as u32;
+                            (pw.max(1), ph.max(1))
+                        };
+
+                        if pixel_w != last_surface_w || pixel_h != last_surface_h {
+                            log::info!(
+                                "Render thread: window resized {}x{} -> {}x{}",
+                                last_surface_w,
+                                last_surface_h,
+                                pixel_w,
+                                pixel_h
+                            );
+                            renderer.resize(pixel_w, pixel_h);
+                            last_surface_w = pixel_w;
+                            last_surface_h = pixel_h;
+                        }
+                    }
+
+                    // Render if we have new frame data
+                    if has_new_frame {
+                        if let Err(e) = renderer.render(current_format) {
+                            log::error!("Render failed: {}", e);
+                        }
+                    }
+
+                    // Periodically check if the native window is still visible (~every 500ms)
+                    check_counter += 1;
+                    if check_counter % 500 == 0 {
+                        let visible = unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let window_ptr = ns_window_addr as *mut AnyObject;
+                            let visible: bool = msg_send![window_ptr, isVisible];
+                            visible
+                        };
+                        if !visible {
+                            log::info!("macOS render window closed by user");
                             is_open.store(false, Ordering::Relaxed);
+                            let _ = event_tx.send(WindowEvent::CloseRequested);
                             break;
                         }
                     }
-                }
 
-                // Upload only the latest frame, skip stale ones
-                if let Some(frame) = latest_frame {
-                    current_format = frame.format;
-                    render_frame_count += 1;
-                    if stale_count > 0 {
-                        log::info!("Render thread: dropped {} stale frames, rendering frame {}",
-                            stale_count, render_frame_count);
-                    }
-                    if let Err(e) = renderer.upload_frame(&frame) {
-                        log::error!("Render thread: Failed to upload frame: {}", e);
-                    }
-                    has_new_frame = true;
-                    if render_frame_count <= 5 || render_frame_count % 50 == 0 {
-                        log::info!("Render thread: frame {} uploaded ({}x{}, {:?})",
-                            render_frame_count, frame.width, frame.height, frame.format);
-                    }
-                }
+                    // Toolbar: mouse tracking + auto-hide + resolution polling
+                    if check_counter % 10 == 0 {
+                        // every ~10ms
+                        let (mouse_in_window, mouse_x, mouse_y) = unsafe {
+                            use objc2::msg_send;
+                            use objc2::runtime::AnyObject;
+                            let window_ptr = ns_window_addr as *mut AnyObject;
+                            let view = ns_view_addr as *mut AnyObject;
 
-                // Detect window resize by querying NSView backing size
-                if has_new_frame {
-                    let (pixel_w, pixel_h) = unsafe {
-                        use objc2::msg_send;
-                        use objc2::runtime::AnyObject;
+                            let mouse_loc: objc2_foundation::NSPoint =
+                                msg_send![window_ptr, mouseLocationOutsideOfEventStream];
+                            let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
 
-                        let view = ns_view_addr as *mut AnyObject;
-                        let window_ptr = ns_window_addr as *mut AnyObject;
+                            let inside = mouse_loc.x >= 0.0
+                                && mouse_loc.y >= 0.0
+                                && mouse_loc.x <= bounds.size.width
+                                && mouse_loc.y <= bounds.size.height;
 
-                        // Get logical bounds of the view
-                        let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
-                        // Get backing scale factor (Retina)
-                        let scale: f64 = msg_send![window_ptr, backingScaleFactor];
+                            (inside, mouse_loc.x, mouse_loc.y)
+                        };
 
-                        let pw = (bounds.size.width * scale) as u32;
-                        let ph = (bounds.size.height * scale) as u32;
-                        (pw.max(1), ph.max(1))
-                    };
+                        // Detect mouse movement
+                        let mouse_moved = (mouse_x - last_mouse_x).abs() > 1.0
+                            || (mouse_y - last_mouse_y).abs() > 1.0;
+                        if mouse_moved && mouse_in_window {
+                            last_mouse_move_time = std::time::Instant::now();
+                        }
+                        last_mouse_x = mouse_x;
+                        last_mouse_y = mouse_y;
 
-                    if pixel_w != last_surface_w || pixel_h != last_surface_h {
-                        log::info!("Render thread: window resized {}x{} -> {}x{}",
-                            last_surface_w, last_surface_h, pixel_w, pixel_h);
-                        renderer.resize(pixel_w, pixel_h);
-                        last_surface_w = pixel_w;
-                        last_surface_h = pixel_h;
-                    }
-                }
+                        let should_show =
+                            mouse_in_window && last_mouse_move_time.elapsed() < toolbar_hide_delay;
 
-                // Render if we have new frame data
-                if has_new_frame {
-                    if let Err(e) = renderer.render(current_format) {
-                        log::error!("Render failed: {}", e);
-                    }
-                }
-
-                // Periodically check if the native window is still visible (~every 500ms)
-                check_counter += 1;
-                if check_counter % 500 == 0 {
-                    let visible = unsafe {
-                        use objc2::msg_send;
-                        use objc2::runtime::AnyObject;
-                        let window_ptr = ns_window_addr as *mut AnyObject;
-                        let visible: bool = msg_send![window_ptr, isVisible];
-                        visible
-                    };
-                    if !visible {
-                        log::info!("macOS render window closed by user");
-                        is_open.store(false, Ordering::Relaxed);
-                        let _ = event_tx.send(WindowEvent::CloseRequested);
-                        break;
-                    }
-                }
-
-                // Toolbar: mouse tracking + auto-hide + resolution polling
-                if check_counter % 10 == 0 { // every ~10ms
-                    let (mouse_in_window, mouse_x, mouse_y) = unsafe {
-                        use objc2::msg_send;
-                        use objc2::runtime::AnyObject;
-                        let window_ptr = ns_window_addr as *mut AnyObject;
-                        let view = ns_view_addr as *mut AnyObject;
-
-                        let mouse_loc: objc2_foundation::NSPoint =
-                            msg_send![window_ptr, mouseLocationOutsideOfEventStream];
-                        let bounds: objc2_foundation::NSRect = msg_send![view, bounds];
-
-                        let inside = mouse_loc.x >= 0.0
-                            && mouse_loc.y >= 0.0
-                            && mouse_loc.x <= bounds.size.width
-                            && mouse_loc.y <= bounds.size.height;
-
-                        (inside, mouse_loc.x, mouse_loc.y)
-                    };
-
-                    // Detect mouse movement
-                    let mouse_moved = (mouse_x - last_mouse_x).abs() > 1.0
-                        || (mouse_y - last_mouse_y).abs() > 1.0;
-                    if mouse_moved && mouse_in_window {
-                        last_mouse_move_time = std::time::Instant::now();
-                    }
-                    last_mouse_x = mouse_x;
-                    last_mouse_y = mouse_y;
-
-                    let should_show = mouse_in_window
-                        && last_mouse_move_time.elapsed() < toolbar_hide_delay;
-
-                    // Update toolbar panel visibility on state change
-                    if should_show != toolbar_visible {
-                        toolbar_visible = should_show;
-                        if let Some(handle) = crate::APP_HANDLE.get() {
-                            let panel_addr = toolbar_panel_addr;
-                            let win_addr = ns_window_addr;
-                            let show = should_show;
-                            let _ = handle.run_on_main_thread(move || unsafe {
+                        // Update toolbar panel visibility on state change
+                        if should_show != toolbar_visible {
+                            toolbar_visible = should_show;
+                            if let Some(handle) = crate::APP_HANDLE.get() {
+                                let panel_addr = toolbar_panel_addr;
+                                let win_addr = ns_window_addr;
+                                let show = should_show;
+                                let _ = handle.run_on_main_thread(move || unsafe {
                                 use objc2::msg_send;
                                 use objc2::runtime::AnyObject;
                                 use objc2_foundation::{NSPoint, NSRect, NSSize};
@@ -501,68 +513,71 @@ impl RenderWindow {
                                     let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
                                 }
                             });
+                            }
                         }
-                    }
 
-                    // Poll both NSPopUpButtons (~every 100ms)
-                    if check_counter % 100 == 0 {
-                        let res_selected: isize = unsafe {
-                            use objc2::msg_send;
-                            use objc2::runtime::AnyObject;
-                            let popup = res_popup_addr as *mut AnyObject;
-                            msg_send![popup, indexOfSelectedItem]
-                        };
-                        let br_selected: isize = unsafe {
-                            use objc2::msg_send;
-                            use objc2::runtime::AnyObject;
-                            let popup = br_popup_addr as *mut AnyObject;
-                            msg_send![popup, indexOfSelectedItem]
-                        };
+                        // Poll both NSPopUpButtons (~every 100ms)
+                        if check_counter % 100 == 0 {
+                            let res_selected: isize = unsafe {
+                                use objc2::msg_send;
+                                use objc2::runtime::AnyObject;
+                                let popup = res_popup_addr as *mut AnyObject;
+                                msg_send![popup, indexOfSelectedItem]
+                            };
+                            let br_selected: isize = unsafe {
+                                use objc2::msg_send;
+                                use objc2::runtime::AnyObject;
+                                let popup = br_popup_addr as *mut AnyObject;
+                                msg_send![popup, indexOfSelectedItem]
+                            };
 
-                        // Send event if either dropdown changed
-                        if (res_selected != last_selected_resolution || br_selected != last_selected_bitrate)
-                            && res_selected >= 0 && br_selected >= 0
-                        {
-                            last_selected_resolution = res_selected;
-                            last_selected_bitrate = br_selected;
+                            // Send event if either dropdown changed
+                            if (res_selected != last_selected_resolution
+                                || br_selected != last_selected_bitrate)
+                                && res_selected >= 0
+                                && br_selected >= 0
+                            {
+                                last_selected_resolution = res_selected;
+                                last_selected_bitrate = br_selected;
 
-                            let res_opts = &crate::simple_streaming::RESOLUTION_OPTIONS;
-                            let br_opts = &crate::simple_streaming::BITRATE_OPTIONS;
-                            if let (Some(res), Some(br)) = (
-                                res_opts.get(res_selected as usize),
-                                br_opts.get(br_selected as usize),
-                            ) {
-                                log::info!("Toolbar: {} + {}",
-                                    res.label, br.label);
-                                let _ = event_tx.send(WindowEvent::ResolutionRequested(
-                                    res.target_width, res.target_height, br.bitrate,
-                                ));
+                                let res_opts = &crate::simple_streaming::RESOLUTION_OPTIONS;
+                                let br_opts = &crate::simple_streaming::BITRATE_OPTIONS;
+                                if let (Some(res), Some(br)) = (
+                                    res_opts.get(res_selected as usize),
+                                    br_opts.get(br_selected as usize),
+                                ) {
+                                    log::info!("Toolbar: {} + {}", res.label, br.label);
+                                    let _ = event_tx.send(WindowEvent::ResolutionRequested(
+                                        res.target_width,
+                                        res.target_height,
+                                        br.bitrate,
+                                    ));
+                                }
                             }
                         }
                     }
+
+                    // Brief sleep to avoid busy-waiting (1ms ~= 1000 fps max)
+                    std::thread::sleep(std::time::Duration::from_millis(1));
                 }
 
-                // Brief sleep to avoid busy-waiting (1ms ~= 1000 fps max)
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+                // Cleanup: close the toolbar panel and window on the main thread
+                if let Some(handle) = crate::APP_HANDLE.get() {
+                    let _ = handle.run_on_main_thread(move || unsafe {
+                        use objc2::msg_send;
+                        use objc2::runtime::AnyObject;
+                        // Close toolbar panel first
+                        let panel = toolbar_panel_addr as *mut AnyObject;
+                        let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
+                        let _: () = msg_send![panel, close];
+                        let window = ns_window_addr as *mut AnyObject;
+                        let _: () = msg_send![window, close];
+                        // Release the retained window (we retained it during creation)
+                        let _: () = msg_send![window, release];
+                    });
+                }
 
-            // Cleanup: close the toolbar panel and window on the main thread
-            if let Some(handle) = crate::APP_HANDLE.get() {
-                let _ = handle.run_on_main_thread(move || unsafe {
-                    use objc2::msg_send;
-                    use objc2::runtime::AnyObject;
-                    // Close toolbar panel first
-                    let panel = toolbar_panel_addr as *mut AnyObject;
-                    let _: () = msg_send![panel, orderOut: std::ptr::null::<AnyObject>()];
-                    let _: () = msg_send![panel, close];
-                    let window = ns_window_addr as *mut AnyObject;
-                    let _: () = msg_send![window, close];
-                    // Release the retained window (we retained it during creation)
-                    let _: () = msg_send![window, release];
-                });
-            }
-
-            log::info!("macOS render thread ended");
+                log::info!("macOS render thread ended");
             })); // end catch_unwind
 
             if let Err(panic_info) = result {
@@ -597,11 +612,7 @@ unsafe impl Send for SendPtr {}
 /// Returns (NSView pointer, NSWindow pointer).
 /// The NSWindow is retained (caller must release when done).
 #[cfg(target_os = "macos")]
-fn create_ns_window(
-    title: &str,
-    width: u32,
-    height: u32,
-) -> Result<(SendPtr, SendPtr), String> {
+fn create_ns_window(title: &str, width: u32, height: u32) -> Result<(SendPtr, SendPtr), String> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -682,7 +693,12 @@ fn create_ns_window(
 /// Returns (panel_addr, resolution_popup_addr, bitrate_popup_addr) as usize.
 /// Must be called on the main thread.
 #[cfg(target_os = "macos")]
-fn create_toolbar_panel(window_addr: usize, _window_width: u32, default_res_idx: usize, default_br_idx: usize) -> Result<(usize, usize, usize), String> {
+fn create_toolbar_panel(
+    window_addr: usize,
+    _window_width: u32,
+    default_res_idx: usize,
+    default_br_idx: usize,
+) -> Result<(usize, usize, usize), String> {
     use objc2::msg_send;
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
@@ -756,10 +772,7 @@ fn create_toolbar_panel(window_addr: usize, _window_width: u32, default_res_idx:
 
         // --- Resolution dropdown (left side) ---
         let popup_w: f64 = 140.0;
-        let res_frame = NSRect::new(
-            NSPoint::new(10.0, 4.0),
-            NSSize::new(popup_w, 28.0),
-        );
+        let res_frame = NSRect::new(NSPoint::new(10.0, 4.0), NSSize::new(popup_w, 28.0));
         let res_alloc: *mut AnyObject = msg_send![popup_cls, alloc];
         let res_popup: *mut AnyObject = msg_send![
             res_alloc,
@@ -775,7 +788,8 @@ fn create_toolbar_panel(window_addr: usize, _window_width: u32, default_res_idx:
             let ns_title = NSString::from_str(opt.label);
             let _: () = msg_send![res_popup, addItemWithTitle: &*ns_title];
         }
-        let res_idx = (default_res_idx as isize).min(crate::simple_streaming::RESOLUTION_OPTIONS.len() as isize - 1);
+        let res_idx = (default_res_idx as isize)
+            .min(crate::simple_streaming::RESOLUTION_OPTIONS.len() as isize - 1);
         let _: () = msg_send![res_popup, selectItemAtIndex: res_idx];
 
         // --- Bitrate dropdown (right side) ---
@@ -798,7 +812,8 @@ fn create_toolbar_panel(window_addr: usize, _window_width: u32, default_res_idx:
             let ns_title = NSString::from_str(opt.label);
             let _: () = msg_send![br_popup, addItemWithTitle: &*ns_title];
         }
-        let br_idx = (default_br_idx as isize).min(crate::simple_streaming::BITRATE_OPTIONS.len() as isize - 1);
+        let br_idx = (default_br_idx as isize)
+            .min(crate::simple_streaming::BITRATE_OPTIONS.len() as isize - 1);
         let _: () = msg_send![br_popup, selectItemAtIndex: br_idx];
 
         // Add both popups to panel's content view
@@ -854,7 +869,9 @@ impl ApplicationHandler for RenderWindow {
 
         log::debug!(
             "EventLoop resumed, creating window '{}' ({}x{})",
-            self.title, self.width, self.height
+            self.title,
+            self.width,
+            self.height
         );
 
         let window_attrs = WindowAttributes::default()
@@ -877,9 +894,8 @@ impl ApplicationHandler for RenderWindow {
         // Initialize renderer
         log::debug!("Initializing wgpu renderer...");
         let window_clone = window.clone();
-        let renderer = pollster::block_on(async {
-            WgpuRenderer::new_with_surface(window_clone).await
-        });
+        let renderer =
+            pollster::block_on(async { WgpuRenderer::new_with_surface(window_clone).await });
 
         match renderer {
             Ok(r) => {
@@ -915,7 +931,9 @@ impl ApplicationHandler for RenderWindow {
                 if let Some(ref mut renderer) = self.renderer {
                     renderer.resize(size.width, size.height);
                 }
-                let _ = self.event_tx.send(WindowEvent::Resized(size.width, size.height));
+                let _ = self
+                    .event_tx
+                    .send(WindowEvent::Resized(size.width, size.height));
             }
             WinitWindowEvent::Focused(focused) => {
                 let _ = self.event_tx.send(WindowEvent::Focused(focused));
@@ -928,7 +946,9 @@ impl ApplicationHandler for RenderWindow {
                 }
             }
             WinitWindowEvent::CursorMoved { position, .. } => {
-                let _ = self.event_tx.send(WindowEvent::MouseMoved(position.x, position.y));
+                let _ = self
+                    .event_tx
+                    .send(WindowEvent::MouseMoved(position.x, position.y));
             }
             WinitWindowEvent::MouseInput { state, button, .. } => {
                 let button_id = match button {
@@ -939,10 +959,9 @@ impl ApplicationHandler for RenderWindow {
                     winit::event::MouseButton::Forward => 4,
                     winit::event::MouseButton::Other(id) => id as u32,
                 };
-                let _ = self.event_tx.send(WindowEvent::MouseButton(
-                    button_id,
-                    state.is_pressed(),
-                ));
+                let _ = self
+                    .event_tx
+                    .send(WindowEvent::MouseButton(button_id, state.is_pressed()));
             }
             WinitWindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {

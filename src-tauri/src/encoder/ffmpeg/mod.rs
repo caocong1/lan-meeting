@@ -7,7 +7,9 @@
 //! - QSV (Intel)
 //! - libx264 software fallback
 
-use crate::encoder::{EncodedFrame, EncoderConfig, EncoderError, EncoderPreset, FrameType, VideoEncoder};
+use crate::encoder::{
+    EncodedFrame, EncoderConfig, EncoderError, EncoderPreset, FrameType, VideoEncoder,
+};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::codec::Context;
 use ffmpeg_next::encoder::Video as VideoEncoder_;
@@ -59,20 +61,23 @@ impl HwEncoderType {
         match self {
             HwEncoderType::Nvenc => {
                 // NVENC options for low latency
-                opts.set("preset", match preset {
-                    EncoderPreset::UltraFast => "p1",  // Fastest
-                    EncoderPreset::Fast => "p2",
-                    EncoderPreset::Medium => "p4",
-                    EncoderPreset::Quality => "p7",    // Best quality
-                });
-                opts.set("tune", "ll");  // Low latency
-                opts.set("rc", "cbr");   // Constant bitrate
+                opts.set(
+                    "preset",
+                    match preset {
+                        EncoderPreset::UltraFast => "p1", // Fastest
+                        EncoderPreset::Fast => "p2",
+                        EncoderPreset::Medium => "p4",
+                        EncoderPreset::Quality => "p7", // Best quality
+                    },
+                );
+                opts.set("tune", "ll"); // Low latency
+                opts.set("rc", "cbr"); // Constant bitrate
                 opts.set("zerolatency", "1");
             }
             HwEncoderType::VideoToolbox => {
                 // VideoToolbox options
                 opts.set("realtime", "1");
-                opts.set("allow_sw", "0");  // Prefer hardware
+                opts.set("allow_sw", "0"); // Prefer hardware
             }
             HwEncoderType::Vaapi => {
                 // VAAPI options
@@ -80,21 +85,27 @@ impl HwEncoderType {
             }
             HwEncoderType::Qsv => {
                 // Intel QSV options
-                opts.set("preset", match preset {
-                    EncoderPreset::UltraFast => "veryfast",
-                    EncoderPreset::Fast => "faster",
-                    EncoderPreset::Medium => "medium",
-                    EncoderPreset::Quality => "veryslow",
-                });
+                opts.set(
+                    "preset",
+                    match preset {
+                        EncoderPreset::UltraFast => "veryfast",
+                        EncoderPreset::Fast => "faster",
+                        EncoderPreset::Medium => "medium",
+                        EncoderPreset::Quality => "veryslow",
+                    },
+                );
             }
             HwEncoderType::Libx264 => {
                 // libx264 options for low latency
-                opts.set("preset", match preset {
-                    EncoderPreset::UltraFast => "ultrafast",
-                    EncoderPreset::Fast => "veryfast",
-                    EncoderPreset::Medium => "medium",
-                    EncoderPreset::Quality => "slow",
-                });
+                opts.set(
+                    "preset",
+                    match preset {
+                        EncoderPreset::UltraFast => "ultrafast",
+                        EncoderPreset::Fast => "veryfast",
+                        EncoderPreset::Medium => "medium",
+                        EncoderPreset::Quality => "slow",
+                    },
+                );
                 opts.set("tune", "zerolatency");
                 opts.set("crf", "23");
             }
@@ -157,10 +168,7 @@ impl FfmpegEncoder {
     fn detect_best_encoder() -> Result<HwEncoderType, EncoderError> {
         // Platform-specific priority
         #[cfg(target_os = "macos")]
-        let priority = [
-            HwEncoderType::VideoToolbox,
-            HwEncoderType::Libx264,
-        ];
+        let priority = [HwEncoderType::VideoToolbox, HwEncoderType::Libx264];
 
         #[cfg(target_os = "windows")]
         let priority = [
@@ -214,7 +222,9 @@ impl FfmpegEncoder {
                 let b = bgra[si] as i32;
                 let g = bgra[si + 1] as i32;
                 let r = bgra[si + 2] as i32;
-                y_plane[dst_row + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                // BT.709: Y = 0.2126*R + 0.7152*G + 0.0722*B
+                y_plane[dst_row + x] =
+                    (((54 * r + 183 * g + 19 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
             }
         }
 
@@ -228,8 +238,10 @@ impl FfmpegEncoder {
                 let g = bgra[si + 1] as i32;
                 let r = bgra[si + 2] as i32;
                 let ui = uv_row + bx;
-                u_plane[ui] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
-                v_plane[ui] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                // BT.709: U = -0.1146*R - 0.3854*G + 0.5000*B
+                u_plane[ui] = (((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                // BT.709: V = 0.5000*R - 0.4542*G - 0.0458*B
+                v_plane[ui] = (((128 * r - 116 * g - 12 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
             }
         }
 
@@ -279,8 +291,9 @@ impl VideoEncoder for FfmpegEncoder {
             .ok_or_else(|| EncoderError::InitError(format!("Codec {} not found", codec_name)))?;
 
         let context = Context::new_with_codec(codec);
-        let mut encoder = context.encoder().video()
-            .map_err(|e| EncoderError::InitError(format!("Failed to create encoder context: {}", e)))?;
+        let mut encoder = context.encoder().video().map_err(|e| {
+            EncoderError::InitError(format!("Failed to create encoder context: {}", e))
+        })?;
 
         // Configure encoder
         encoder.set_width(config.width);
@@ -295,7 +308,8 @@ impl VideoEncoder for FfmpegEncoder {
         // Set encoder-specific options
         let opts = self.encoder_type.options(config.preset);
 
-        let encoder = encoder.open_with(opts)
+        let encoder = encoder
+            .open_with(opts)
             .map_err(|e| EncoderError::InitError(format!("Failed to open encoder: {}", e)))?;
 
         self.encoder = Some(Mutex::new(encoder));
@@ -316,10 +330,14 @@ impl VideoEncoder for FfmpegEncoder {
     }
 
     fn encode(&mut self, frame_data: &[u8], timestamp: u64) -> Result<EncodedFrame, EncoderError> {
-        let config = self.config.as_ref()
+        let config = self
+            .config
+            .as_ref()
             .ok_or_else(|| EncoderError::EncodeError("Encoder not initialized".to_string()))?;
 
-        let encoder_guard = self.encoder.as_ref()
+        let encoder_guard = self
+            .encoder
+            .as_ref()
             .ok_or_else(|| EncoderError::EncodeError("Encoder not initialized".to_string()))?;
 
         let mut encoder = encoder_guard.lock();
@@ -359,7 +377,9 @@ impl VideoEncoder for FfmpegEncoder {
                 let src_offset = y_size + y * (config.width / 2) as usize;
                 let dst_offset = y * u_stride;
                 frame.data_mut(1)[dst_offset..dst_offset + (config.width / 2) as usize]
-                    .copy_from_slice(&yuv_data[src_offset..src_offset + (config.width / 2) as usize]);
+                    .copy_from_slice(
+                        &yuv_data[src_offset..src_offset + (config.width / 2) as usize],
+                    );
             }
 
             // Copy V plane
@@ -367,12 +387,15 @@ impl VideoEncoder for FfmpegEncoder {
                 let src_offset = y_size + uv_size + y * (config.width / 2) as usize;
                 let dst_offset = y * v_stride;
                 frame.data_mut(2)[dst_offset..dst_offset + (config.width / 2) as usize]
-                    .copy_from_slice(&yuv_data[src_offset..src_offset + (config.width / 2) as usize]);
+                    .copy_from_slice(
+                        &yuv_data[src_offset..src_offset + (config.width / 2) as usize],
+                    );
             }
         }
 
         // Send frame to encoder
-        encoder.send_frame(&frame)
+        encoder
+            .send_frame(&frame)
             .map_err(|e| EncoderError::EncodeError(format!("Failed to send frame: {}", e)))?;
         self.pts += 1;
 

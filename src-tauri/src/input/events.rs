@@ -65,47 +65,25 @@ impl Modifiers {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InputEvent {
     /// Mouse moved to position (relative 0.0-1.0)
-    MouseMove {
-        x: f32,
-        y: f32,
-    },
+    MouseMove { x: f32, y: f32 },
 
     /// Mouse button pressed
-    MouseDown {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
+    MouseDown { button: MouseButton, x: f32, y: f32 },
 
     /// Mouse button released
-    MouseUp {
-        button: MouseButton,
-        x: f32,
-        y: f32,
-    },
+    MouseUp { button: MouseButton, x: f32, y: f32 },
 
     /// Mouse wheel scrolled
-    MouseScroll {
-        delta_x: f32,
-        delta_y: f32,
-    },
+    MouseScroll { delta_x: f32, delta_y: f32 },
 
     /// Key pressed (scancode for cross-platform compatibility)
-    KeyDown {
-        scancode: u32,
-        modifiers: Modifiers,
-    },
+    KeyDown { scancode: u32, modifiers: Modifiers },
 
     /// Key released
-    KeyUp {
-        scancode: u32,
-        modifiers: Modifiers,
-    },
+    KeyUp { scancode: u32, modifiers: Modifiers },
 
     /// Text input (for complex input methods)
-    TextInput {
-        text: String,
-    },
+    TextInput { text: String },
 }
 
 impl InputEvent {
@@ -131,12 +109,18 @@ impl InputEvent {
 
     /// Create key down event
     pub fn key_down(scancode: u32, modifiers: Modifiers) -> Self {
-        Self::KeyDown { scancode, modifiers }
+        Self::KeyDown {
+            scancode,
+            modifiers,
+        }
     }
 
     /// Create key up event
     pub fn key_up(scancode: u32, modifiers: Modifiers) -> Self {
-        Self::KeyUp { scancode, modifiers }
+        Self::KeyUp {
+            scancode,
+            modifiers,
+        }
     }
 
     /// Create text input event

@@ -9,7 +9,9 @@ use core_foundation::string::CFString;
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
     fn AXIsProcessTrusted() -> bool;
-    fn AXIsProcessTrustedWithOptions(options: *const core_foundation::dictionary::__CFDictionary) -> bool;
+    fn AXIsProcessTrustedWithOptions(
+        options: *const core_foundation::dictionary::__CFDictionary,
+    ) -> bool;
 }
 
 /// Check if the process has accessibility permission

@@ -2,9 +2,7 @@
 // Uses enigo for keyboard/mouse simulation
 
 use super::{InputError, InputEvent, Modifiers, MouseButton};
-use enigo::{
-    Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
-};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use parking_lot::Mutex;
 
 /// Input controller for remote control
@@ -46,8 +44,14 @@ impl InputController {
                 self.mouse_up(*button)
             }
             InputEvent::MouseScroll { delta_x, delta_y } => self.mouse_scroll(*delta_x, *delta_y),
-            InputEvent::KeyDown { scancode, modifiers } => self.key_down(*scancode, *modifiers),
-            InputEvent::KeyUp { scancode, modifiers } => self.key_up(*scancode, *modifiers),
+            InputEvent::KeyDown {
+                scancode,
+                modifiers,
+            } => self.key_down(*scancode, *modifiers),
+            InputEvent::KeyUp {
+                scancode,
+                modifiers,
+            } => self.key_up(*scancode, *modifiers),
             InputEvent::TextInput { text } => self.text_input(text),
         }
     }
@@ -242,22 +246,22 @@ fn scancode_to_key(scancode: u32) -> Option<Key> {
         0x27 => Some(Key::Unicode('0')),
 
         // Special keys
-        0x28 => Some(Key::Return),     // Enter
-        0x29 => Some(Key::Escape),     // Escape
-        0x2A => Some(Key::Backspace),  // Backspace
-        0x2B => Some(Key::Tab),        // Tab
-        0x2C => Some(Key::Space),      // Space
-        0x2D => Some(Key::Unicode('-')), // Minus
-        0x2E => Some(Key::Unicode('=')), // Equals
-        0x2F => Some(Key::Unicode('[')), // Left bracket
-        0x30 => Some(Key::Unicode(']')), // Right bracket
+        0x28 => Some(Key::Return),        // Enter
+        0x29 => Some(Key::Escape),        // Escape
+        0x2A => Some(Key::Backspace),     // Backspace
+        0x2B => Some(Key::Tab),           // Tab
+        0x2C => Some(Key::Space),         // Space
+        0x2D => Some(Key::Unicode('-')),  // Minus
+        0x2E => Some(Key::Unicode('=')),  // Equals
+        0x2F => Some(Key::Unicode('[')),  // Left bracket
+        0x30 => Some(Key::Unicode(']')),  // Right bracket
         0x31 => Some(Key::Unicode('\\')), // Backslash
-        0x33 => Some(Key::Unicode(';')), // Semicolon
+        0x33 => Some(Key::Unicode(';')),  // Semicolon
         0x34 => Some(Key::Unicode('\'')), // Quote
-        0x35 => Some(Key::Unicode('`')), // Grave
-        0x36 => Some(Key::Unicode(',')), // Comma
-        0x37 => Some(Key::Unicode('.')), // Period
-        0x38 => Some(Key::Unicode('/')), // Slash
+        0x35 => Some(Key::Unicode('`')),  // Grave
+        0x36 => Some(Key::Unicode(',')),  // Comma
+        0x37 => Some(Key::Unicode('.')),  // Period
+        0x38 => Some(Key::Unicode('/')),  // Slash
 
         // Function keys
         0x3A => Some(Key::F1),

@@ -27,7 +27,11 @@ impl VideoDecoder for DxvaDecoder {
         Ok(())
     }
 
-    fn decode(&mut self, _data: &[u8], timestamp: u64) -> Result<Option<DecodedFrame>, DecoderError> {
+    fn decode(
+        &mut self,
+        _data: &[u8],
+        timestamp: u64,
+    ) -> Result<Option<DecodedFrame>, DecoderError> {
         let config = self.config.as_ref().unwrap();
         Ok(Some(DecodedFrame::bgra(
             config.width,

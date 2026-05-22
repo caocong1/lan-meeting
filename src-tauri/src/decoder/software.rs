@@ -48,10 +48,11 @@ impl SoftwareDecoder {
                 let u_val = u_data[u_idx] as i32 - 128;
                 let v_val = v_data[v_idx] as i32 - 128;
 
-                // YUV to RGB conversion (BT.601)
-                let r = (y_val + ((v_val * 359) >> 8)).clamp(0, 255) as u8;
-                let g = (y_val - ((u_val * 88 + v_val * 183) >> 8)).clamp(0, 255) as u8;
-                let b = (y_val + ((u_val * 454) >> 8)).clamp(0, 255) as u8;
+                // YUV to RGB conversion (BT.709)
+                // R = Y + 1.5748*(V-128), G = Y - 0.1873*(U-128) - 0.4681*(V-128), B = Y + 1.8556*(U-128)
+                let r = (y_val + ((v_val * 403) >> 8)).clamp(0, 255) as u8;
+                let g = (y_val - ((u_val * 48 + v_val * 120) >> 8)).clamp(0, 255) as u8;
+                let b = (y_val + ((u_val * 475) >> 8)).clamp(0, 255) as u8;
 
                 let bgra_idx = (y * w + x) * 4;
                 bgra[bgra_idx] = b;
@@ -68,8 +69,9 @@ impl SoftwareDecoder {
 impl VideoDecoder for SoftwareDecoder {
     fn init(&mut self, config: DecoderConfig) -> Result<(), DecoderError> {
         // Create decoder
-        let decoder = Decoder::new()
-            .map_err(|e| DecoderError::InitError(format!("Failed to create OpenH264 decoder: {}", e)))?;
+        let decoder = Decoder::new().map_err(|e| {
+            DecoderError::InitError(format!("Failed to create OpenH264 decoder: {}", e))
+        })?;
 
         self.decoder = Some(Mutex::new(decoder));
         self.config = Some(config.clone());
@@ -85,7 +87,11 @@ impl VideoDecoder for SoftwareDecoder {
         Ok(())
     }
 
-    fn decode(&mut self, data: &[u8], timestamp: u64) -> Result<Option<DecodedFrame>, DecoderError> {
+    fn decode(
+        &mut self,
+        data: &[u8],
+        timestamp: u64,
+    ) -> Result<Option<DecodedFrame>, DecoderError> {
         let config = self
             .config
             .as_ref()

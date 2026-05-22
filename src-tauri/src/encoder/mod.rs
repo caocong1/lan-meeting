@@ -1,9 +1,11 @@
 // Video encoder module
 // Hardware encoding with software fallback
 
-pub mod ffmpeg;
 pub mod scaler;
 pub mod software;
+
+#[cfg(feature = "media-ffmpeg")]
+pub mod ffmpeg;
 
 // Legacy platform-specific stubs (kept for reference)
 #[cfg(target_os = "macos")]
@@ -52,7 +54,7 @@ impl Default for EncoderConfig {
             width: 1920,
             height: 1080,
             fps: 60,
-            bitrate: 8_000_000,     // 8 Mbps
+            bitrate: 8_000_000,      // 8 Mbps
             max_bitrate: 15_000_000, // 15 Mbps peak
             keyframe_interval: 60,   // 1 second at 60fps
             preset: EncoderPreset::UltraFast,
@@ -98,12 +100,15 @@ pub trait VideoEncoder: Send + Sync {
 /// Create the best available encoder for this platform
 pub fn create_encoder() -> Result<Box<dyn VideoEncoder>, EncoderError> {
     // Try FFmpeg hardware-accelerated encoder first
-    match ffmpeg::FfmpegEncoder::new() {
-        Ok(enc) => {
-            log::info!("Using FFmpeg encoder: {}", enc.info());
-            return Ok(Box::new(enc));
+    #[cfg(feature = "media-ffmpeg")]
+    {
+        match ffmpeg::FfmpegEncoder::new() {
+            Ok(enc) => {
+                log::info!("Using FFmpeg encoder: {}", enc.info());
+                return Ok(Box::new(enc));
+            }
+            Err(e) => log::warn!("FFmpeg encoder not available: {}", e),
         }
-        Err(e) => log::warn!("FFmpeg encoder not available: {}", e),
     }
 
     // Fall back to OpenH264 software encoder

@@ -3,17 +3,24 @@
 
 use crate::capture::ScreenCapture;
 use crate::decoder::{DecoderConfig, OutputFormat, VideoDecoder};
+use crate::diagnostics;
 use crate::encoder::scaler::FrameScaler;
 use crate::encoder::{EncoderConfig, EncoderPreset, FrameType};
 use crate::network::protocol::{self, Message};
-use crate::network::quic::{self, QuicStream};
+use crate::network::quic;
 use crate::renderer::{RenderFrame, RenderWindow, RenderWindowHandle};
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+
+const DEFAULT_TARGET_WIDTH: u32 = 2048;
+const DEFAULT_TARGET_HEIGHT: u32 = 1280;
+const SOFTWARE_HIGH_RES_FPS_CAP: u32 = 15;
+const HIGH_RES_PIXEL_THRESHOLD: u32 = 1920 * 1080;
+const MAX_VIEWER_FRAME_AGE_MS: u64 = 1_500;
 
 /// Streaming errors
 #[derive(Debug, thiserror::Error)]
@@ -49,9 +56,9 @@ pub enum Quality {
 impl Quality {
     pub fn bitrate(&self) -> u32 {
         match self {
-            Quality::Auto | Quality::High => 8_000_000,
-            Quality::Medium => 4_000_000,
-            Quality::Low => 2_000_000,
+            Quality::Auto | Quality::High => 12_000_000,
+            Quality::Medium => 6_000_000,
+            Quality::Low => 3_000_000,
         }
     }
 }
@@ -122,7 +129,6 @@ impl StreamingManager {
 
         self.width = display.width;
         self.height = display.height;
-        self.config = config.clone();
 
         // Start capture
         capture
@@ -130,8 +136,14 @@ impl StreamingManager {
             .map_err(|e| StreamingError::CaptureError(e.to_string()))?;
 
         // Downscale before encoding so all encoders see a predictable, decoder-friendly size.
-        // High-DPI Windows screens can exceed hardware decoder limits and cause black viewers.
-        let pre_scaler = FrameScaler::new_with_target(self.width, self.height, 1920, 1080);
+        // A 2K-ish 16:10 target keeps high-DPI desktop text more readable than
+        // 1080p without pushing the software encoder into multi-second lag.
+        let pre_scaler = FrameScaler::new_with_target(
+            self.width,
+            self.height,
+            DEFAULT_TARGET_WIDTH,
+            DEFAULT_TARGET_HEIGHT,
+        );
         let target_width = pre_scaler.dst_width;
         let target_height = pre_scaler.dst_height;
 
@@ -139,13 +151,28 @@ impl StreamingManager {
         let mut encoder = crate::encoder::create_encoder()
             .map_err(|e| StreamingError::EncoderError(e.to_string()))?;
 
+        let encoder_info = encoder.info().to_string();
+        let mut effective_fps = config.fps.max(1);
+        let target_pixels = target_width.saturating_mul(target_height);
+        if encoder_info.contains("Software")
+            && target_pixels > HIGH_RES_PIXEL_THRESHOLD
+            && effective_fps > SOFTWARE_HIGH_RES_FPS_CAP
+        {
+            log::info!(
+                "Capping software high-resolution stream fps: requested={} effective={}",
+                effective_fps,
+                SOFTWARE_HIGH_RES_FPS_CAP
+            );
+            effective_fps = SOFTWARE_HIGH_RES_FPS_CAP;
+        }
+
         let encoder_config = EncoderConfig {
             width: target_width,
             height: target_height,
-            fps: config.fps,
+            fps: effective_fps,
             bitrate: config.quality.bitrate(),
             max_bitrate: config.quality.bitrate() * 2,
-            keyframe_interval: config.fps, // 1 keyframe per second
+            keyframe_interval: effective_fps, // 1 keyframe per second
             preset: EncoderPreset::UltraFast,
         };
 
@@ -165,12 +192,15 @@ impl StreamingManager {
             self.height,
             encode_width,
             encode_height,
-            config.fps
+            effective_fps
         );
 
         // Expose the encoded dimensions to request-time ScreenStart responses.
         self.width = encode_width;
         self.height = encode_height;
+        let mut effective_config = config.clone();
+        effective_config.fps = effective_fps;
+        self.config = effective_config.clone();
         clear_active_viewers();
 
         // Create stop channel
@@ -182,7 +212,7 @@ impl StreamingManager {
 
         let is_streaming = self.is_streaming.clone();
         let frame_count = self.frame_count.clone();
-        let fps = config.fps;
+        let fps = effective_config.fps;
         // Use encoded dimensions (may be scaled for OpenH264)
         let width = encode_width;
         let height = encode_height;
@@ -209,10 +239,10 @@ impl StreamingManager {
             let mut last_raw_frame: Option<Vec<u8>> = None;
             let mut timeout_count: u32 = 0;
 
-            // Frame send bookkeeping. Keep one long-lived QUIC stream per
-            // active viewer so the receiver can continuously read frames from
-            // the stream it already accepted.
-            let mut peer_streams: HashMap<String, crate::network::quic::QuicStream> = HashMap::new();
+            // Frame send bookkeeping. The receiver accepts frame streams
+            // independently from long-lived control streams.
+            let mut peer_streams: HashMap<String, quinn::SendStream> =
+                HashMap::new();
 
             loop {
                 // Check for stop signal
@@ -255,6 +285,7 @@ impl StreamingManager {
                 // opened viewer still receives an initial keyframe.
                 let frame_data = match capture.capture_frame() {
                     Ok(frame) => {
+                        diagnostics::record_sharer_capture_frame();
                         timeout_count = 0;
                         last_raw_frame = Some(frame.data);
                         last_raw_frame.as_ref().expect("last frame was just stored")
@@ -280,6 +311,7 @@ impl StreamingManager {
                             }
                         } else {
                             timeout_count = 0;
+                            diagnostics::record_sharer_capture_error(&e.to_string());
                             log::warn!("Capture error: {}", e);
                             continue;
                         }
@@ -307,11 +339,17 @@ impl StreamingManager {
                     }
                 };
                 if encoded.data.is_empty() {
+                    diagnostics::record_sharer_empty_packet(sequence);
                     if sequence < 5 || sequence % 100 == 0 {
                         log::debug!("Encoder returned empty packet at frame {}", sequence);
                     }
                     continue;
                 }
+                diagnostics::record_sharer_encoded_packet(
+                    sequence,
+                    encoded.size,
+                    encoded.frame_type == FrameType::KeyFrame,
+                );
 
                 // Create ScreenFrame message
                 let frame_msg = Message::ScreenFrame {
@@ -324,10 +362,12 @@ impl StreamingManager {
                     data: encoded.data,
                 };
 
-                // Send to all connected peers using persistent streams
+                // Send to all connected peers using frame streams
                 let mut sent_count = 0usize;
                 if let Ok(encoded_msg) = protocol::encode(&frame_msg) {
-                    sent_count = broadcast_frame(&encoded_msg, &mut peer_streams).await;
+                    sent_count =
+                        broadcast_frame(sequence, encoded.size, &encoded_msg, &mut peer_streams)
+                            .await;
                 }
                 if sequence < 5 || sequence % 50 == 0 {
                     log::info!(
@@ -343,11 +383,7 @@ impl StreamingManager {
                 frame_count.fetch_add(1, Ordering::Relaxed);
             }
 
-            // Clean up: finish all persistent streams
-            for (peer, mut stream) in peer_streams.drain() {
-                log::debug!("Closing persistent stream to {}", peer);
-                let _ = stream.finish().await;
-            }
+            peer_streams.clear();
 
             let _ = capture.stop();
             is_streaming.store(false, Ordering::SeqCst);
@@ -410,6 +446,8 @@ pub struct ViewerSession {
     height: u32,
     is_active: bool,
     frame_count: u32,
+    dropping_until_keyframe: bool,
+    stale_drop_count: u32,
 }
 
 impl ViewerSession {
@@ -426,6 +464,8 @@ impl ViewerSession {
             height: 0,
             is_active: false,
             frame_count: 0,
+            dropping_until_keyframe: false,
+            stale_drop_count: 0,
         })
     }
 
@@ -455,26 +495,30 @@ impl ViewerSession {
             output_format: OutputFormat::BGRA,
         };
 
-        self.decoder
-            .init(config)
-            .map_err(|e| {
-                log::error!("Decoder init failed: {}", e);
-                StreamingError::DecoderError(e.to_string())
-            })?;
+        self.decoder.init(config).map_err(|e| {
+            log::error!("Decoder init failed: {}", e);
+            StreamingError::DecoderError(e.to_string())
+        })?;
         log::debug!("Decoder initialized successfully");
 
         // Create native render window
         let title = format!("{} 的屏幕 ({})", self.peer_name, self.peer_ip);
-        log::debug!("Creating native render window: '{}' ({}x{})", title, width, height);
-        let window_handle = RenderWindow::create(&title, width, height)
-            .map_err(|e| {
-                log::error!("RenderWindow::create failed: {}", e);
-                StreamingError::DecoderError(format!("Failed to create window: {}", e))
-            })?;
+        log::debug!(
+            "Creating native render window: '{}' ({}x{})",
+            title,
+            width,
+            height
+        );
+        let window_handle = RenderWindow::create(&title, width, height).map_err(|e| {
+            log::error!("RenderWindow::create failed: {}", e);
+            StreamingError::DecoderError(format!("Failed to create window: {}", e))
+        })?;
 
         self.window_handle = Some(window_handle);
         self.is_active = true;
         self.frame_count = 0;
+        self.dropping_until_keyframe = false;
+        self.stale_drop_count = 0;
 
         log::info!("Native render window created for {}", self.peer_ip);
         Ok(())
@@ -483,6 +527,8 @@ impl ViewerSession {
     /// Handle ScreenFrame message - decode and render to native window
     pub fn handle_screen_frame(
         &mut self,
+        sequence: u32,
+        frame_type: protocol::FrameType,
         timestamp: u64,
         data: &[u8],
     ) -> Result<(), StreamingError> {
@@ -499,25 +545,83 @@ impl ViewerSession {
             }
         }
 
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(timestamp);
+        let frame_age_ms = now_ms.saturating_sub(timestamp);
+        let is_keyframe = matches!(frame_type, protocol::FrameType::KeyFrame);
+
+        if frame_age_ms > MAX_VIEWER_FRAME_AGE_MS && !is_keyframe {
+            self.dropping_until_keyframe = true;
+            self.stale_drop_count = self.stale_drop_count.saturating_add(1);
+            if self.stale_drop_count <= 3 || sequence % 50 == 0 {
+                log::warn!(
+                    "Dropping stale screen delta frame {} from {} (age={}ms, dropped={})",
+                    sequence,
+                    self.peer_ip,
+                    frame_age_ms,
+                    self.stale_drop_count
+                );
+            }
+            return Ok(());
+        }
+
+        if self.dropping_until_keyframe && !is_keyframe {
+            self.stale_drop_count = self.stale_drop_count.saturating_add(1);
+            if self.stale_drop_count <= 3 || sequence % 50 == 0 {
+                log::warn!(
+                    "Dropping delta frame {} while waiting for keyframe from {} (age={}ms, dropped={})",
+                    sequence,
+                    self.peer_ip,
+                    frame_age_ms,
+                    self.stale_drop_count
+                );
+            }
+            return Ok(());
+        }
+
+        if is_keyframe {
+            self.dropping_until_keyframe = false;
+        }
+
+        if sequence < 5 || sequence % 50 == 0 {
+            log::info!(
+                "Viewer frame {} from {} age={}ms bytes={} keyframe={}",
+                sequence,
+                self.peer_ip,
+                frame_age_ms,
+                data.len(),
+                is_keyframe
+            );
+        }
+
         // Decode frame
-        if let Some(decoded) = self
-            .decoder
-            .decode(data, timestamp)
-            .map_err(|e| StreamingError::DecoderError(e.to_string()))?
-        {
+        let decoded = match self.decoder.decode(data, timestamp) {
+            Ok(decoded) => decoded,
+            Err(e) => {
+                diagnostics::record_viewer_decode_error(sequence, &e.to_string());
+                return Err(StreamingError::DecoderError(e.to_string()));
+            }
+        };
+
+        if let Some(decoded) = decoded {
+            diagnostics::record_viewer_decoded_frame(sequence);
             // Convert DecodedFrame to RenderFrame based on data type
             let render_frame = if let Some(cpu_data) = decoded.cpu_data() {
                 match decoded.format {
-                    OutputFormat::BGRA => RenderFrame::from_bgra(
-                        decoded.width,
-                        decoded.height,
-                        cpu_data.to_vec(),
-                    ),
+                    OutputFormat::BGRA => {
+                        RenderFrame::from_bgra(decoded.width, decoded.height, cpu_data.to_vec())
+                    }
                     OutputFormat::YUV420 => RenderFrame::from_yuv420(
                         decoded.width,
                         decoded.height,
                         cpu_data.to_vec(),
-                        decoded.strides().unwrap_or([decoded.width as usize, decoded.width as usize / 2, decoded.width as usize / 2]),
+                        decoded.strides().unwrap_or([
+                            decoded.width as usize,
+                            decoded.width as usize / 2,
+                            decoded.width as usize / 2,
+                        ]),
                     ),
                 }
             } else {
@@ -530,11 +634,16 @@ impl ViewerSession {
             // Send to native window for GPU rendering
             if let Some(ref handle) = self.window_handle {
                 if let Err(e) = handle.render_frame(render_frame) {
+                    diagnostics::record_viewer_render_failure(sequence, &e.to_string());
                     log::warn!("Failed to render frame: {}", e);
+                } else {
+                    diagnostics::record_viewer_render_success(sequence);
                 }
             }
 
             self.frame_count += 1;
+        } else {
+            diagnostics::record_viewer_decoder_none(sequence);
         }
 
         Ok(())
@@ -567,7 +676,10 @@ impl ViewerSession {
 
     /// Check if window is open
     pub fn is_window_open(&self) -> bool {
-        self.window_handle.as_ref().map(|h| h.is_open()).unwrap_or(false)
+        self.window_handle
+            .as_ref()
+            .map(|h| h.is_open())
+            .unwrap_or(false)
     }
 
     /// Get dimensions
@@ -636,7 +748,13 @@ fn is_active_viewer(peer_ip: &str) -> bool {
 }
 
 /// Store ScreenStart metadata when it arrives before the user opens a viewer.
-pub fn store_pending_screen_start(peer_ip: String, width: u32, height: u32, fps: u8, codec: String) {
+pub fn store_pending_screen_start(
+    peer_ip: String,
+    width: u32,
+    height: u32,
+    fps: u8,
+    codec: String,
+) {
     PENDING_SCREEN_STARTS
         .write()
         .insert(peer_ip, (width, height, fps, codec));
@@ -646,10 +764,7 @@ pub fn store_pending_screen_start(peer_ip: String, width: u32, height: u32, fps:
 ///
 /// Returns true when a cached ScreenStart was applied and the native window was
 /// opened immediately.
-pub fn create_viewer_session(
-    peer_ip: String,
-    peer_name: String,
-) -> Result<bool, StreamingError> {
+pub fn create_viewer_session(peer_ip: String, peer_name: String) -> Result<bool, StreamingError> {
     let mut session = ViewerSession::new(peer_ip.clone(), peer_name)?;
     let mut started_immediately = false;
 
@@ -683,8 +798,8 @@ pub async fn request_screen_stream(peer_ip: &str, display_id: u32) -> Result<(),
         preferred_quality: 80,
     };
 
-    let encoded = protocol::encode(&request_msg)
-        .map_err(|e| StreamingError::NetworkError(e.to_string()))?;
+    let encoded =
+        protocol::encode(&request_msg).map_err(|e| StreamingError::NetworkError(e.to_string()))?;
 
     quic::send_to_peer(peer_ip, &encoded)
         .await
@@ -693,15 +808,16 @@ pub async fn request_screen_stream(peer_ip: &str, display_id: u32) -> Result<(),
     Ok(())
 }
 
-/// Send frame data to active viewers.
+/// Send frame data to active viewers on persistent unidirectional streams.
 ///
-/// Control messages use short streams. Screen frames use a persistent stream
-/// per viewer because opening and finishing a stream for every frame can make
-/// the sender report success while the receiver never catches up accepting the
-/// frame streams on Windows/Parallels.
+/// Each viewer gets one long-lived uni stream that is reused for every frame.
+/// Uni streams are accepted by the dedicated uni accept task in
+/// `handle_incoming_connection`, which already handles ScreenFrame messages.
 async fn broadcast_frame(
+    sequence: u32,
+    payload_bytes: usize,
     data: &[u8],
-    peer_streams: &mut HashMap<String, QuicStream>,
+    peer_streams: &mut HashMap<String, quinn::SendStream>,
 ) -> usize {
     let connections = quic::get_all_connections();
     let mut sent_count = 0usize;
@@ -720,33 +836,51 @@ async fn broadcast_frame(
         let key = conn.remote_addr().to_string();
         active_keys.insert(key.clone());
 
-        let mut stream = if let Some(stream) = peer_streams.remove(&key) {
-            stream
-        } else {
-            match conn.open_bi_stream().await {
-                Ok(stream) => {
-                    log::info!("Opened persistent frame stream to {}", key);
-                    stream
+        // Remove the stream from the map so we can use it without borrowing conflicts
+        let mut stream = match peer_streams.remove(&key) {
+            Some(s) => s,
+            None => match conn.open_uni_stream().await {
+                Ok(s) => {
+                    diagnostics::record_frame_stream_opened(&key);
+                    log::info!("Opened persistent frame uni stream to {}", key);
+                    s
                 }
                 Err(e) => {
-                    log::warn!("Failed to open frame stream to {}: {}", key, e);
+                    diagnostics::record_frame_stream_open_failed(&key, &e.to_string());
+                    log::warn!("Failed to open frame uni stream to {}: {}", key, e);
                     continue;
                 }
-            }
+            },
         };
 
-        match stream.send_framed(data).await {
+        let send_started = std::time::Instant::now();
+        match quic::send_uni_framed(&mut stream, data).await {
             Ok(()) => {
+                diagnostics::record_frame_send_success(
+                    &key,
+                    sequence,
+                    payload_bytes,
+                    data.len(),
+                    send_started.elapsed(),
+                );
                 sent_count += 1;
+                // Put the stream back for reuse
                 peer_streams.insert(key, stream);
             }
             Err(e) => {
-                log::warn!("Failed to send frame to {}: {}", key, e);
-                let _ = stream.finish().await;
+                diagnostics::record_frame_send_failure(&key, sequence, &e.to_string());
+                log::warn!(
+                    "Failed to send frame {} to {}: {} (stream will be recreated)",
+                    sequence,
+                    key,
+                    e
+                );
+                // Stream is dropped — will be recreated next frame
             }
         }
     }
 
+    // Clean up streams for disconnected/stopped viewers
     let stale_keys: Vec<String> = peer_streams
         .keys()
         .filter(|key| !active_keys.contains(*key))
@@ -754,8 +888,7 @@ async fn broadcast_frame(
         .collect();
     for key in stale_keys {
         if let Some(mut stream) = peer_streams.remove(&key) {
-            log::debug!("Closing stale frame stream to {}", key);
-            let _ = stream.finish().await;
+            let _ = stream.finish();
         }
     }
 

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 /// Default QUIC port
 pub const DEFAULT_PORT: u16 = 19876;
@@ -56,8 +57,9 @@ impl QuicEndpoint {
         let (server_config, _cert) = Self::generate_server_config()?;
 
         // Create endpoint with server config
-        let endpoint = Endpoint::server(server_config, config.bind_addr)
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to create endpoint: {}", e)))?;
+        let endpoint = Endpoint::server(server_config, config.bind_addr).map_err(|e| {
+            NetworkError::ConnectionFailed(format!("Failed to create endpoint: {}", e))
+        })?;
 
         log::info!("QUIC endpoint created on {}", config.bind_addr);
 
@@ -67,8 +69,10 @@ impl QuicEndpoint {
     /// Generate server configuration with self-signed certificate
     fn generate_server_config() -> Result<(ServerConfig, CertificateDer<'static>), NetworkError> {
         // Generate self-signed certificate
-        let cert = rcgen::generate_simple_self_signed(vec!["lan-meeting".to_string()])
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to generate cert: {}", e)))?;
+        let cert =
+            rcgen::generate_simple_self_signed(vec!["lan-meeting".to_string()]).map_err(|e| {
+                NetworkError::ConnectionFailed(format!("Failed to generate cert: {}", e))
+            })?;
 
         let cert_der = CertificateDer::from(cert.cert);
         let key_der = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
@@ -134,8 +138,9 @@ impl QuicEndpoint {
         crypto.alpn_protocols = vec![b"lan-meeting".to_vec()];
 
         let mut client_config = ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(crypto)
-                .map_err(|e| NetworkError::ConnectionFailed(format!("Client config error: {}", e)))?,
+            quinn::crypto::rustls::QuicClientConfig::try_from(crypto).map_err(|e| {
+                NetworkError::ConnectionFailed(format!("Client config error: {}", e))
+            })?,
         ));
 
         // Configure transport for low latency video streaming
@@ -290,40 +295,35 @@ impl QuicConnection {
 
     /// Open a new bidirectional stream
     pub async fn open_bi_stream(&self) -> Result<QuicStream, NetworkError> {
-        let (send, recv) = self
-            .connection
-            .open_bi()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to open stream: {}", e)))?;
+        let (send, recv) =
+            self.connection.open_bi().await.map_err(|e| {
+                NetworkError::ConnectionFailed(format!("Failed to open stream: {}", e))
+            })?;
 
         Ok(QuicStream::new(send, recv))
     }
 
     /// Accept an incoming bidirectional stream
     pub async fn accept_bi_stream(&self) -> Result<QuicStream, NetworkError> {
-        let (send, recv) = self
-            .connection
-            .accept_bi()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to accept stream: {}", e)))?;
+        let (send, recv) = self.connection.accept_bi().await.map_err(|e| {
+            NetworkError::ConnectionFailed(format!("Failed to accept stream: {}", e))
+        })?;
 
         Ok(QuicStream::new(send, recv))
     }
 
     /// Open a unidirectional send stream
     pub async fn open_uni_stream(&self) -> Result<SendStream, NetworkError> {
-        self.connection
-            .open_uni()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to open uni stream: {}", e)))
+        self.connection.open_uni().await.map_err(|e| {
+            NetworkError::ConnectionFailed(format!("Failed to open uni stream: {}", e))
+        })
     }
 
     /// Accept a unidirectional receive stream
     pub async fn accept_uni_stream(&self) -> Result<RecvStream, NetworkError> {
-        self.connection
-            .accept_uni()
-            .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Failed to accept uni stream: {}", e)))
+        self.connection.accept_uni().await.map_err(|e| {
+            NetworkError::ConnectionFailed(format!("Failed to accept uni stream: {}", e))
+        })
     }
 
     /// Send datagram (unreliable, for video frames)
@@ -376,7 +376,11 @@ impl QuicStream {
         self.send
             .write_all(data)
             .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Send error: {}", e)))
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Send error: {}", e)))?;
+        self.send
+            .flush()
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Flush error: {}", e)))
     }
 
     /// Send data with length prefix (for framed messages)
@@ -389,7 +393,11 @@ impl QuicStream {
         self.send
             .write_all(data)
             .await
-            .map_err(|e| NetworkError::ConnectionFailed(format!("Send data error: {}", e)))
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Send data error: {}", e)))?;
+        self.send
+            .flush()
+            .await
+            .map_err(|e| NetworkError::ConnectionFailed(format!("Flush error: {}", e)))
     }
 
     /// Receive data from this stream
@@ -423,9 +431,19 @@ impl QuicStream {
     /// Returns Ok(Some(data)) if available, Ok(None) if nothing ready.
     pub async fn try_recv_framed(&mut self) -> Result<Option<Vec<u8>>, NetworkError> {
         let mut len_buf = [0u8; 4];
-        match tokio::time::timeout(std::time::Duration::ZERO, self.recv.read_exact(&mut len_buf)).await {
+        match tokio::time::timeout(
+            std::time::Duration::ZERO,
+            self.recv.read_exact(&mut len_buf),
+        )
+        .await
+        {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(NetworkError::ConnectionFailed(format!("Recv length error: {}", e))),
+            Ok(Err(e)) => {
+                return Err(NetworkError::ConnectionFailed(format!(
+                    "Recv length error: {}",
+                    e
+                )));
+            }
             Err(_) => return Ok(None), // no data ready
         }
 
@@ -450,6 +468,41 @@ impl QuicStream {
     pub fn stop_receiving(&mut self) {
         self.recv.stop(0u32.into()).ok();
     }
+}
+
+/// Send data on a unidirectional stream with a length prefix.
+pub async fn send_uni_framed(stream: &mut SendStream, data: &[u8]) -> Result<(), NetworkError> {
+    let len = data.len() as u32;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Send uni length error: {}", e)))?;
+    stream
+        .write_all(data)
+        .await
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Send uni data error: {}", e)))?;
+    stream
+        .flush()
+        .await
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Flush uni error: {}", e)))
+}
+
+/// Receive data from a unidirectional stream with a length prefix.
+pub async fn recv_uni_framed(stream: &mut RecvStream) -> Result<Vec<u8>, NetworkError> {
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Recv uni length error: {}", e)))?;
+
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut data = vec![0u8; len];
+    stream
+        .read_exact(&mut data)
+        .await
+        .map_err(|e| NetworkError::ConnectionFailed(format!("Recv uni data error: {}", e)))?;
+
+    Ok(data)
 }
 
 /// Get connection by ID
@@ -508,18 +561,18 @@ pub async fn send_to_peer(peer_id: &str, data: &[u8]) -> Result<(), super::Netwo
 
     // Use a timeout for stream opening to fail fast instead of waiting
     // for the full connection idle timeout (30s)
-    let mut stream = tokio::time::timeout(
-        Duration::from_secs(3),
-        conn.open_bi_stream(),
-    )
-    .await
-    .map_err(|_| {
-        log::warn!("Timeout opening stream to {}, connection may be dead", peer_id);
-        super::NetworkError::ConnectionFailed(format!(
-            "Stream open to {} timed out - peer may be unreachable (check firewall settings)",
-            peer_id
-        ))
-    })??;
+    let mut stream = tokio::time::timeout(Duration::from_secs(3), conn.open_bi_stream())
+        .await
+        .map_err(|_| {
+            log::warn!(
+                "Timeout opening stream to {}, connection may be dead",
+                peer_id
+            );
+            super::NetworkError::ConnectionFailed(format!(
+                "Stream open to {} timed out - peer may be unreachable (check firewall settings)",
+                peer_id
+            ))
+        })??;
 
     stream.send_framed(data).await?;
     stream.finish().await?;
@@ -578,7 +631,11 @@ pub fn cleanup_dead_connections() -> Vec<String> {
         let devices = discovery::get_devices();
         for device in &devices {
             if dead_ips.contains(&device.ip) {
-                log::info!("Marking device '{}' (ip={}) online after dead connection", device.name, device.ip);
+                log::info!(
+                    "Marking device '{}' (ip={}) online after dead connection",
+                    device.name,
+                    device.ip
+                );
                 discovery::update_device_status(&device.id, discovery::DeviceStatus::Online);
 
                 // Notify frontend

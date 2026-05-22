@@ -66,7 +66,10 @@ impl FrameScaler {
         if needs_scaling {
             log::info!(
                 "Frame scaler initialized: {}x{} -> {}x{} (cropped)",
-                src_width, src_height, dst_width, dst_height
+                src_width,
+                src_height,
+                dst_width,
+                dst_height
             );
         }
 
@@ -83,7 +86,12 @@ impl FrameScaler {
     /// Create a scaler that downscales to fit within a target resolution box.
     /// Maintains source aspect ratio (fit-inside), clamped to even numbers and OpenH264 limits.
     /// If source is already smaller than or equal to target, no scaling is done.
-    pub fn new_with_target(src_width: u32, src_height: u32, target_width: u32, target_height: u32) -> Self {
+    pub fn new_with_target(
+        src_width: u32,
+        src_height: u32,
+        target_width: u32,
+        target_height: u32,
+    ) -> Self {
         // Fit source aspect ratio inside target box
         let max_w = target_width.min(src_width).min(OPENH264_MAX_WIDTH);
         let max_h = target_height.min(src_height).min(OPENH264_MAX_HEIGHT);
@@ -105,7 +113,10 @@ impl FrameScaler {
         if needs_scaling {
             log::info!(
                 "Frame scaler initialized: {}x{} -> {}x{} (downscale)",
-                src_width, src_height, dst_width, dst_height
+                src_width,
+                src_height,
+                dst_width,
+                dst_height
             );
         }
 
@@ -123,23 +134,15 @@ impl FrameScaler {
     /// Returns scaled/cropped frame data, or the original slice if no adaptation needed.
     pub fn scale<'a>(&self, bgra: &'a [u8]) -> std::borrow::Cow<'a, [u8]> {
         match self.mode {
-            AdaptMode::None => {
-                std::borrow::Cow::Borrowed(bgra)
-            }
+            AdaptMode::None => std::borrow::Cow::Borrowed(bgra),
             AdaptMode::CropHeight => {
                 let row_bytes = self.src_width as usize * 4;
                 let total = row_bytes * self.dst_height as usize;
                 std::borrow::Cow::Borrowed(&bgra[..total])
             }
-            AdaptMode::CropWidth => {
-                self.crop_width(bgra)
-            }
-            AdaptMode::CropBoth => {
-                self.crop_both(bgra)
-            }
-            AdaptMode::Downscale => {
-                std::borrow::Cow::Owned(self.downscale_nearest(bgra))
-            }
+            AdaptMode::CropWidth => self.crop_width(bgra),
+            AdaptMode::CropBoth => self.crop_both(bgra),
+            AdaptMode::Downscale => std::borrow::Cow::Owned(self.downscale_nearest(bgra)),
         }
     }
 

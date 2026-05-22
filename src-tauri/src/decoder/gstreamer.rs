@@ -31,7 +31,8 @@ pub struct GStreamerDecoder {
 impl GStreamerDecoder {
     pub fn new() -> Result<Self, DecoderError> {
         // Initialize GStreamer
-        gst::init().map_err(|e| DecoderError::InitError(format!("GStreamer init failed: {}", e)))?;
+        gst::init()
+            .map_err(|e| DecoderError::InitError(format!("GStreamer init failed: {}", e)))?;
 
         log::info!("GStreamer initialized: version {}", gst::version_string());
 
@@ -58,17 +59,13 @@ impl GStreamerDecoder {
         let h264parse = gst::ElementFactory::make("h264parse")
             .name("parse")
             .build()
-            .map_err(|e| {
-                DecoderError::InitError(format!("Failed to create h264parse: {}", e))
-            })?;
+            .map_err(|e| DecoderError::InitError(format!("Failed to create h264parse: {}", e)))?;
 
         // decodebin: auto-selects best decoder (hardware preferred)
         let decodebin = gst::ElementFactory::make("decodebin")
             .name("decode")
             .build()
-            .map_err(|e| {
-                DecoderError::InitError(format!("Failed to create decodebin: {}", e))
-            })?;
+            .map_err(|e| DecoderError::InitError(format!("Failed to create decodebin: {}", e)))?;
 
         // videoconvert: converts decoded frames to target format
         let videoconvert = gst::ElementFactory::make("videoconvert")
@@ -114,9 +111,8 @@ impl GStreamerDecoder {
         })?;
 
         // Link videoconvert → appsink
-        gst::Element::link_many([&videoconvert, appsink.upcast_ref()]).map_err(|e| {
-            DecoderError::InitError(format!("Failed to link convert→sink: {}", e))
-        })?;
+        gst::Element::link_many([&videoconvert, appsink.upcast_ref()])
+            .map_err(|e| DecoderError::InitError(format!("Failed to link convert→sink: {}", e)))?;
 
         // decodebin has dynamic pads - connect when pad is added
         let convert_weak = videoconvert.downgrade();
@@ -125,7 +121,9 @@ impl GStreamerDecoder {
                 return;
             };
 
-            let sink_pad = convert.static_pad("sink").expect("videoconvert has sink pad");
+            let sink_pad = convert
+                .static_pad("sink")
+                .expect("videoconvert has sink pad");
             if sink_pad.is_linked() {
                 return;
             }
@@ -138,9 +136,9 @@ impl GStreamerDecoder {
         });
 
         // Start the pipeline
-        pipeline.set_state(gst::State::Playing).map_err(|e| {
-            DecoderError::InitError(format!("Failed to start pipeline: {:?}", e))
-        })?;
+        pipeline
+            .set_state(gst::State::Playing)
+            .map_err(|e| DecoderError::InitError(format!("Failed to start pipeline: {:?}", e)))?;
 
         log::info!(
             "GStreamer pipeline started: {}x{} output={:?}",
@@ -179,16 +177,15 @@ impl VideoDecoder for GStreamerDecoder {
         let mut state = state.lock();
 
         // Push H.264 data into appsrc
-        let mut buffer = gst::Buffer::with_size(data.len()).map_err(|e| {
-            DecoderError::DecodeError(format!("Failed to create buffer: {}", e))
-        })?;
+        let mut buffer = gst::Buffer::with_size(data.len())
+            .map_err(|e| DecoderError::DecodeError(format!("Failed to create buffer: {}", e)))?;
 
         {
             let buffer_ref = buffer.get_mut().unwrap();
             buffer_ref.set_pts(gst::ClockTime::from_nseconds(timestamp * 1_000_000));
-            let mut map = buffer_ref.map_writable().map_err(|e| {
-                DecoderError::DecodeError(format!("Failed to map buffer: {}", e))
-            })?;
+            let mut map = buffer_ref
+                .map_writable()
+                .map_err(|e| DecoderError::DecodeError(format!("Failed to map buffer: {}", e)))?;
             map.copy_from_slice(data);
         }
 
@@ -198,7 +195,10 @@ impl VideoDecoder for GStreamerDecoder {
             .map_err(|e| DecoderError::DecodeError(format!("Failed to push buffer: {}", e)))?;
 
         // Try to pull a decoded frame (non-blocking)
-        match state.appsink.try_pull_sample(gst::ClockTime::from_mseconds(0)) {
+        match state
+            .appsink
+            .try_pull_sample(gst::ClockTime::from_mseconds(0))
+        {
             Some(sample) => {
                 let frame = sample_to_frame(&sample, &state.config, timestamp)?;
                 state.frame_count += 1;
@@ -250,8 +250,9 @@ impl VideoDecoder for GStreamerDecoder {
         let _ = state.appsrc.end_of_stream();
 
         // Pull remaining frames
-        while let Some(sample) =
-            state.appsink.try_pull_sample(gst::ClockTime::from_mseconds(100))
+        while let Some(sample) = state
+            .appsink
+            .try_pull_sample(gst::ClockTime::from_mseconds(100))
         {
             if let Ok(frame) = sample_to_frame(&sample, &state.config, 0) {
                 frames.push(frame);
@@ -349,7 +350,13 @@ fn sample_to_frame(
                 video_info.stride()[1] as usize,
                 video_info.stride()[2] as usize,
             ];
-            Ok(DecodedFrame::yuv420(width, height, ts, map.to_vec(), strides))
+            Ok(DecodedFrame::yuv420(
+                width,
+                height,
+                ts,
+                map.to_vec(),
+                strides,
+            ))
         }
     }
 }

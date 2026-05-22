@@ -9,7 +9,7 @@ export default defineConfig({
   // Vite options for Tauri
   clearScreen: false,
   server: {
-    port: 5173,
+    port: Number(process.env.PORT) || 5173,
     strictPort: true,
     watch: {
       ignored: ["**/src-tauri/**"],

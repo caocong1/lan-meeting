@@ -17,8 +17,7 @@ unsafe extern "C" {
         active_displays: *mut CGDirectDisplayID,
         display_count: *mut u32,
     ) -> i32;
-    fn CGDisplayCreateImage(display: CGDirectDisplayID)
-        -> *mut core_foundation::base::CFTypeRef;
+    fn CGDisplayCreateImage(display: CGDirectDisplayID) -> *mut core_foundation::base::CFTypeRef;
 }
 
 /// macOS screen capture implementation using CoreGraphics
@@ -65,11 +64,8 @@ impl MacOSCapture {
         let mut display_count: u32 = 0;
 
         unsafe {
-            let result = CGGetActiveDisplayList(
-                MAX_DISPLAYS,
-                display_ids.as_mut_ptr(),
-                &mut display_count,
-            );
+            let result =
+                CGGetActiveDisplayList(MAX_DISPLAYS, display_ids.as_mut_ptr(), &mut display_count);
 
             if result != 0 {
                 return Err(CaptureError::InitError(format!(

@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::{
-    core::Interface,
-    Win32::Foundation::HMODULE,
-    Win32::Graphics::Direct3D::*,
-    Win32::Graphics::Direct3D11::*,
-    Win32::Graphics::Dxgi::Common::*,
-    Win32::Graphics::Dxgi::*,
+    Win32::Foundation::HMODULE, Win32::Graphics::Direct3D::*, Win32::Graphics::Direct3D11::*,
+    Win32::Graphics::Dxgi::Common::*, Win32::Graphics::Dxgi::*, core::Interface,
 };
+
+/// Keep DXGI capture non-blocking. The streaming loop already owns pacing, and
+/// blocking here adds visible end-to-end latency when the desktop is static.
+const DXGI_FRAME_TIMEOUT_MS: u32 = 0;
 
 /// Windows screen capture implementation using DXGI Desktop Duplication
 pub struct WindowsCapture {
@@ -52,8 +52,9 @@ impl WindowsCapture {
 
         unsafe {
             // Create DXGI factory
-            let factory: IDXGIFactory1 = CreateDXGIFactory1()
-                .map_err(|e| CaptureError::InitError(format!("CreateDXGIFactory1 failed: {}", e)))?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| {
+                CaptureError::InitError(format!("CreateDXGIFactory1 failed: {}", e))
+            })?;
 
             // Enumerate adapters
             let mut adapter_idx = 0u32;
@@ -119,13 +120,14 @@ impl WindowsCapture {
 
         unsafe {
             // Create DXGI factory
-            let factory: IDXGIFactory1 = CreateDXGIFactory1()
-                .map_err(|e| CaptureError::InitError(format!("CreateDXGIFactory1 failed: {}", e)))?;
+            let factory: IDXGIFactory1 = CreateDXGIFactory1().map_err(|e| {
+                CaptureError::InitError(format!("CreateDXGIFactory1 failed: {}", e))
+            })?;
 
             // Get the adapter
-            let adapter: IDXGIAdapter1 = factory.EnumAdapters1(adapter_idx).map_err(|_| {
-                CaptureError::DisplayNotFound(display_id)
-            })?;
+            let adapter: IDXGIAdapter1 = factory
+                .EnumAdapters1(adapter_idx)
+                .map_err(|_| CaptureError::DisplayNotFound(display_id))?;
 
             // Create D3D11 device
             let mut device: Option<ID3D11Device> = None;
@@ -152,14 +154,14 @@ impl WindowsCapture {
             })?;
 
             // Get the output
-            let output: IDXGIOutput = adapter.EnumOutputs(output_idx).map_err(|_| {
-                CaptureError::DisplayNotFound(display_id)
-            })?;
+            let output: IDXGIOutput = adapter
+                .EnumOutputs(output_idx)
+                .map_err(|_| CaptureError::DisplayNotFound(display_id))?;
 
             // Get output description
-            let output_desc = output.GetDesc().map_err(|e| {
-                CaptureError::InitError(format!("GetDesc failed: {}", e))
-            })?;
+            let output_desc = output
+                .GetDesc()
+                .map_err(|e| CaptureError::InitError(format!("GetDesc failed: {}", e)))?;
 
             // Query for IDXGIOutput1 (needed for DuplicateOutput)
             let output1: IDXGIOutput1 = output.cast().map_err(|e| {
@@ -201,9 +203,7 @@ impl WindowsCapture {
             let mut staging_texture: Option<ID3D11Texture2D> = None;
             device
                 .CreateTexture2D(&staging_desc, None, Some(&mut staging_texture))
-                .map_err(|e| {
-                    CaptureError::InitError(format!("CreateTexture2D failed: {}", e))
-                })?;
+                .map_err(|e| CaptureError::InitError(format!("CreateTexture2D failed: {}", e)))?;
 
             let staging_texture = staging_texture.ok_or_else(|| {
                 CaptureError::InitError("CreateTexture2D returned null".to_string())
@@ -283,9 +283,9 @@ impl ScreenCapture for WindowsCapture {
             .ok_or_else(|| CaptureError::CaptureError("Context not initialized".to_string()))?;
 
         let staging_guard = self.staging_texture.read();
-        let staging_texture = staging_guard
-            .as_ref()
-            .ok_or_else(|| CaptureError::CaptureError("Staging texture not initialized".to_string()))?;
+        let staging_texture = staging_guard.as_ref().ok_or_else(|| {
+            CaptureError::CaptureError("Staging texture not initialized".to_string())
+        })?;
 
         let output_desc_guard = self.output_desc.read();
         let output_desc = output_desc_guard
@@ -301,7 +301,11 @@ impl ScreenCapture for WindowsCapture {
             let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut desktop_resource: Option<IDXGIResource> = None;
 
-            let result = duplication.AcquireNextFrame(100, &mut frame_info, &mut desktop_resource);
+            let result = duplication.AcquireNextFrame(
+                DXGI_FRAME_TIMEOUT_MS,
+                &mut frame_info,
+                &mut desktop_resource,
+            );
 
             if result.is_err() {
                 let err = result.unwrap_err();
@@ -329,7 +333,9 @@ impl ScreenCapture for WindowsCapture {
                             log::info!("Capture resources reinitialized after ACCESS_LOST");
                         }
                     }
-                    return Err(CaptureError::CaptureError("Access lost, reinitializing".to_string()));
+                    return Err(CaptureError::CaptureError(
+                        "Access lost, reinitializing".to_string(),
+                    ));
                 }
 
                 return Err(CaptureError::CaptureError(format!(
@@ -351,20 +357,14 @@ impl ScreenCapture for WindowsCapture {
             context.CopyResource(staging_texture, &desktop_texture);
 
             // Release the frame
-            duplication.ReleaseFrame().map_err(|e| {
-                CaptureError::CaptureError(format!("ReleaseFrame failed: {}", e))
-            })?;
+            duplication
+                .ReleaseFrame()
+                .map_err(|e| CaptureError::CaptureError(format!("ReleaseFrame failed: {}", e)))?;
 
             // Map staging texture to read pixels
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context
-                .Map(
-                    staging_texture,
-                    0,
-                    D3D11_MAP_READ,
-                    0,
-                    Some(&mut mapped),
-                )
+                .Map(staging_texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
                 .map_err(|e| CaptureError::CaptureError(format!("Map failed: {}", e)))?;
 
             // Copy pixel data

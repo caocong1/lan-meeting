@@ -89,10 +89,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let u = textureSample(u_texture, yuv_sampler, input.tex_coord).r - 0.5;
     let v = textureSample(v_texture, yuv_sampler, input.tex_coord).r - 0.5;
 
-    // BT.601 YUV to RGB conversion
-    let r = y + 1.402 * v;
-    let g = y - 0.344 * u - 0.714 * v;
-    let b = y + 1.772 * u;
+    // BT.709 YUV to RGB conversion
+    let r = y + 1.5748 * v;
+    let g = y - 0.1873 * u - 0.4681 * v;
+    let b = y + 1.8556 * u;
 
     return vec4<f32>(r, g, b, 1.0);
 }
@@ -155,7 +155,6 @@ impl WgpuRenderer {
         width: u32,
         height: u32,
     ) -> Result<Self, RendererError> {
-
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -163,7 +162,9 @@ impl WgpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| RendererError::GpuNotAvailable(format!("Failed to request adapter: {}", e)))?;
+            .map_err(|e| {
+                RendererError::GpuNotAvailable(format!("Failed to request adapter: {}", e))
+            })?;
 
         log::info!("Using GPU adapter: {:?}", adapter.get_info().name);
 
@@ -182,14 +183,24 @@ impl WgpuRenderer {
             .unwrap_or(capabilities.formats[0]);
 
         // Pick the best present mode from what's supported
-        let present_mode = if capabilities.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        let present_mode = if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Mailbox)
+        {
             wgpu::PresentMode::Mailbox
-        } else if capabilities.present_modes.contains(&wgpu::PresentMode::Immediate) {
+        } else if capabilities
+            .present_modes
+            .contains(&wgpu::PresentMode::Immediate)
+        {
             wgpu::PresentMode::Immediate
         } else {
             wgpu::PresentMode::Fifo // always supported
         };
-        log::info!("wgpu present mode: {:?} (available: {:?})", present_mode, capabilities.present_modes);
+        log::info!(
+            "wgpu present mode: {:?} (available: {:?})",
+            present_mode,
+            capabilities.present_modes
+        );
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -243,12 +254,11 @@ impl WgpuRenderer {
                 ],
             });
 
-        let bgra_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("BGRA Pipeline Layout"),
-                bind_group_layouts: &[&bgra_bind_group_layout],
-                immediate_size: 0,
-            });
+        let bgra_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("BGRA Pipeline Layout"),
+            bind_group_layouts: &[&bgra_bind_group_layout],
+            immediate_size: 0,
+        });
 
         let bgra_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("BGRA Pipeline"),
@@ -327,12 +337,11 @@ impl WgpuRenderer {
                 ],
             });
 
-        let yuv_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("YUV Pipeline Layout"),
-                bind_group_layouts: &[&yuv_bind_group_layout],
-                immediate_size: 0,
-            });
+        let yuv_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("YUV Pipeline Layout"),
+            bind_group_layouts: &[&yuv_bind_group_layout],
+            immediate_size: 0,
+        });
 
         let yuv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("YUV Pipeline"),
@@ -395,11 +404,9 @@ impl WgpuRenderer {
 
         // Create surface if window provided
         let surface = if let Some(ref window) = window {
-            Some(
-                instance
-                    .create_surface(window.clone())
-                    .map_err(|e| RendererError::InitError(format!("Failed to create surface: {}", e)))?,
-            )
+            Some(instance.create_surface(window.clone()).map_err(|e| {
+                RendererError::InitError(format!("Failed to create surface: {}", e))
+            })?)
         } else {
             None
         };
@@ -412,7 +419,9 @@ impl WgpuRenderer {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| RendererError::GpuNotAvailable(format!("Failed to request adapter: {}", e)))?;
+            .map_err(|e| {
+                RendererError::GpuNotAvailable(format!("Failed to request adapter: {}", e))
+            })?;
 
         log::info!("Using GPU adapter: {:?}", adapter.get_info().name);
 
@@ -490,12 +499,11 @@ impl WgpuRenderer {
                 ],
             });
 
-        let bgra_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("BGRA Pipeline Layout"),
-                bind_group_layouts: &[&bgra_bind_group_layout],
-                immediate_size: 0,
-            });
+        let bgra_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("BGRA Pipeline Layout"),
+            bind_group_layouts: &[&bgra_bind_group_layout],
+            immediate_size: 0,
+        });
 
         let surface_format = surface_config
             .as_ref()
@@ -580,12 +588,11 @@ impl WgpuRenderer {
                 ],
             });
 
-        let yuv_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("YUV Pipeline Layout"),
-                bind_group_layouts: &[&yuv_bind_group_layout],
-                immediate_size: 0,
-            });
+        let yuv_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("YUV Pipeline Layout"),
+            bind_group_layouts: &[&yuv_bind_group_layout],
+            immediate_size: 0,
+        });
 
         let yuv_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("YUV Pipeline"),
@@ -889,9 +896,9 @@ impl WgpuRenderer {
             .as_ref()
             .ok_or_else(|| RendererError::RenderError("No surface configured".to_string()))?;
 
-        let output = surface
-            .get_current_texture()
-            .map_err(|e| RendererError::RenderError(format!("Failed to get surface texture: {}", e)))?;
+        let output = surface.get_current_texture().map_err(|e| {
+            RendererError::RenderError(format!("Failed to get surface texture: {}", e))
+        })?;
 
         let view = output
             .texture

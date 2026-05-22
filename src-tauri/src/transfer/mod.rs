@@ -51,9 +51,8 @@ pub struct FileInfo {
 impl FileInfo {
     /// Create FileInfo from a file path
     pub fn from_path(path: &Path) -> Result<Self, TransferError> {
-        let file = File::open(path).map_err(|_| {
-            TransferError::FileNotFound(path.display().to_string())
-        })?;
+        let file = File::open(path)
+            .map_err(|_| TransferError::FileNotFound(path.display().to_string()))?;
 
         let metadata = file.metadata()?;
         let size = metadata.len();
@@ -67,9 +66,7 @@ impl FileInfo {
         let checksum = calculate_file_checksum(path)?;
 
         // Guess MIME type
-        let mime_type = mime_guess::from_path(path)
-            .first()
-            .map(|m| m.to_string());
+        let mime_type = mime_guess::from_path(path).first().map(|m| m.to_string());
 
         Ok(Self {
             id: uuid::Uuid::new_v4().to_string(),
@@ -362,8 +359,7 @@ pub struct TransferManager {
 impl TransferManager {
     /// Create a new transfer manager
     pub fn new() -> Self {
-        let download_dir = dirs::download_dir()
-            .unwrap_or_else(|| PathBuf::from("."));
+        let download_dir = dirs::download_dir().unwrap_or_else(|| PathBuf::from("."));
 
         Self {
             transfers: RwLock::new(HashMap::new()),
@@ -391,14 +387,12 @@ impl TransferManager {
         let file_id = info.id.clone();
 
         // Create transfer record
-        let transfer = FileTransfer::new_outgoing(
-            info,
-            peer_id,
-            &path.to_string_lossy(),
-        );
+        let transfer = FileTransfer::new_outgoing(info, peer_id, &path.to_string_lossy());
 
         // Store
-        self.transfers.write().insert(file_id.clone(), transfer.clone());
+        self.transfers
+            .write()
+            .insert(file_id.clone(), transfer.clone());
         self.senders.write().insert(file_id, sender);
 
         Ok(transfer)
@@ -415,7 +409,11 @@ impl TransferManager {
     }
 
     /// Accept an incoming file transfer
-    pub fn accept_transfer(&self, file_id: &str, dest_path: Option<&Path>) -> Result<(), TransferError> {
+    pub fn accept_transfer(
+        &self,
+        file_id: &str,
+        dest_path: Option<&Path>,
+    ) -> Result<(), TransferError> {
         let mut transfers = self.transfers.write();
         let transfer = transfers
             .get_mut(file_id)
@@ -465,7 +463,12 @@ impl TransferManager {
     }
 
     /// Write a received chunk
-    pub fn write_chunk(&self, file_id: &str, offset: u64, data: &[u8]) -> Result<u64, TransferError> {
+    pub fn write_chunk(
+        &self,
+        file_id: &str,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<u64, TransferError> {
         let mut receivers = self.receivers.write();
         let receiver = receivers
             .get_mut(file_id)
@@ -536,7 +539,12 @@ impl TransferManager {
         self.transfers
             .read()
             .values()
-            .filter(|t| matches!(t.status, TransferStatus::InProgress | TransferStatus::Offered))
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    TransferStatus::InProgress | TransferStatus::Offered
+                )
+            })
             .cloned()
             .collect()
     }
@@ -620,9 +628,7 @@ mod tests {
         let dst_path = dir.path().join("dest.bin");
 
         // Create source file
-        let data: Vec<u8> = (0..CHUNK_SIZE + 500)
-            .map(|i| (i % 256) as u8)
-            .collect();
+        let data: Vec<u8> = (0..CHUNK_SIZE + 500).map(|i| (i % 256) as u8).collect();
         std::fs::write(&src_path, &data).unwrap();
 
         let info = FileInfo::from_path(&src_path).unwrap();
@@ -630,7 +636,9 @@ mod tests {
 
         // Write chunks
         receiver.write_chunk(0, &data[..CHUNK_SIZE]).unwrap();
-        receiver.write_chunk(CHUNK_SIZE as u64, &data[CHUNK_SIZE..]).unwrap();
+        receiver
+            .write_chunk(CHUNK_SIZE as u64, &data[CHUNK_SIZE..])
+            .unwrap();
 
         assert!(receiver.is_complete());
         assert!(receiver.verify().unwrap());

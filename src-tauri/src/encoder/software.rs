@@ -3,9 +3,9 @@
 
 use super::scaler::FrameScaler;
 use super::{EncodedFrame, EncoderConfig, EncoderError, FrameType, VideoEncoder};
+use openh264::OpenH264API;
 use openh264::encoder::{Encoder, EncoderConfig as H264Config};
 use openh264::formats::YUVBuffer;
-use openh264::OpenH264API;
 use parking_lot::Mutex;
 
 pub struct SoftwareEncoder {
@@ -56,7 +56,9 @@ impl SoftwareEncoder {
                 let b = bgra[si] as i32;
                 let g = bgra[si + 1] as i32;
                 let r = bgra[si + 2] as i32;
-                y_plane[dst_row + x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                // BT.709: Y = 0.2126*R + 0.7152*G + 0.0722*B
+                y_plane[dst_row + x] =
+                    (((54 * r + 183 * g + 19 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
             }
         }
 
@@ -70,8 +72,10 @@ impl SoftwareEncoder {
                 let g = bgra[si + 1] as i32;
                 let r = bgra[si + 2] as i32;
                 let ui = uv_row + bx;
-                u_plane[ui] = (((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
-                v_plane[ui] = (((112 * r - 94 * g - 18 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                // BT.709: U = -0.1146*R - 0.3854*G + 0.5000*B
+                u_plane[ui] = (((-29 * r - 99 * g + 128 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
+                // BT.709: V = 0.5000*R - 0.4542*G - 0.0458*B
+                v_plane[ui] = (((128 * r - 116 * g - 12 * b + 128) >> 8) + 128).clamp(0, 255) as u8;
             }
         }
 
@@ -125,8 +129,9 @@ impl VideoEncoder for SoftwareEncoder {
             .enable_skip_frame(false); // Disable skip for consistent latency
 
         // Create encoder with config
-        let encoder = Encoder::with_api_config(api, h264_config)
-            .map_err(|e| EncoderError::InitError(format!("Failed to create OpenH264 encoder: {}", e)))?;
+        let encoder = Encoder::with_api_config(api, h264_config).map_err(|e| {
+            EncoderError::InitError(format!("Failed to create OpenH264 encoder: {}", e))
+        })?;
 
         // Store scaler and modified config with scaled dimensions
         let mut scaled_config = config.clone();
@@ -192,11 +197,8 @@ impl VideoEncoder for SoftwareEncoder {
         let yuv_data = Self::bgra_to_yuv420(&scaled_frame, config.width, config.height);
 
         // Create YUV buffer from the converted data
-        let yuv_buffer = YUVBuffer::from_vec(
-            yuv_data,
-            config.width as usize,
-            config.height as usize,
-        );
+        let yuv_buffer =
+            YUVBuffer::from_vec(yuv_data, config.width as usize, config.height as usize);
 
         // Encode the frame
         let bitstream = encoder
@@ -233,7 +235,10 @@ impl VideoEncoder for SoftwareEncoder {
             config.bitrate = bitrate;
             // OpenH264 doesn't support dynamic bitrate change easily,
             // would need to recreate the encoder
-            log::info!("Bitrate change requested to {} bps (may require re-init)", bitrate);
+            log::info!(
+                "Bitrate change requested to {} bps (may require re-init)",
+                bitrate
+            );
         }
         Ok(())
     }

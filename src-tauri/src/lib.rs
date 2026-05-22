@@ -5,6 +5,7 @@ pub mod capture;
 pub mod chat;
 pub mod commands;
 pub mod decoder;
+pub mod diagnostics;
 pub mod encoder;
 pub mod input;
 pub mod network;
@@ -110,6 +111,9 @@ pub fn run() {
             commands::simple_start_sharing,
             commands::simple_request_stream,
             commands::simple_stop_sharing,
+            // Diagnostics
+            commands::get_diagnostics,
+            commands::reset_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -121,11 +125,106 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
 
     log::info!("Handling connection from {}", conn.remote_addr());
 
+    let uni_conn = conn.clone();
+    let uni_accept_task = tokio::spawn(async move {
+        loop {
+            match uni_conn.accept_uni_stream().await {
+                Ok(mut stream) => {
+                    diagnostics::record_uni_stream_accepted();
+                    log::info!(
+                        "[diagnostics] Accepted uni stream #{} from {}",
+                        diagnostics::snapshot().accepted_uni_stream_count,
+                        uni_conn.remote_addr()
+                    );
+                    let conn_clone = uni_conn.clone();
+                    let mut is_first_payload = true;
+
+                    loop {
+                        let data = match network::quic::recv_uni_framed(&mut stream).await {
+                            Ok(data) => data,
+                            Err(e) => {
+                                let message = e.to_string();
+                                if message.contains("stream finished early") {
+                                    log::trace!("Uni stream closed after message: {}", message);
+                                } else {
+                                    log::debug!("Uni stream closed: {}", message);
+                                }
+                                break;
+                            }
+                        };
+
+                        if data.is_empty() {
+                            log::trace!(
+                                "Received unidirectional frame stream warmup from {}",
+                                conn_clone.remote_addr()
+                            );
+                            continue;
+                        }
+
+                        let decoded = network::protocol::decode(&data);
+                        if is_first_payload {
+                            diagnostics::record_incoming_stream_first(
+                                &conn_clone.remote_addr().to_string(),
+                                data.len(),
+                                decoded.as_ref().map(|msg| msg.message_type()).ok(),
+                            );
+                            is_first_payload = false;
+                        }
+
+                        match decoded {
+                            Ok(network::protocol::Message::ScreenFrame {
+                                timestamp,
+                                frame_type,
+                                sequence,
+                                data,
+                            }) => {
+                                handle_screen_frame_message(
+                                    &conn_clone,
+                                    timestamp,
+                                    frame_type,
+                                    sequence,
+                                    &data,
+                                );
+                            }
+                            Ok(network::protocol::Message::ScreenStop) => {
+                                handle_screen_stop_message(&conn_clone);
+                            }
+                            Ok(other) => {
+                                log::warn!(
+                                    "Ignoring {:?} received on unidirectional frame stream from {}",
+                                    other.message_type(),
+                                    conn_clone.remote_addr()
+                                );
+                            }
+                            Err(e) => {
+                                log::warn!(
+                                    "Failed to decode unidirectional payload from {} ({} bytes): {}",
+                                    conn_clone.remote_addr(),
+                                    data.len(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::debug!("Unidirectional accept loop ended: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
     // Accept bidirectional streams for control messages
     loop {
         match conn.accept_bi_stream().await {
             Ok(mut stream) => {
-                log::debug!("Accepted bidirectional stream from {}", conn.remote_addr());
+                diagnostics::record_bi_stream_accepted();
+                log::info!(
+                    "[diagnostics] Accepted bi stream #{} from {}",
+                    diagnostics::snapshot().accepted_bi_stream_count,
+                    conn.remote_addr()
+                );
                 let conn_clone = conn.clone();
                 tokio::spawn(async move {
                     // Read first message to detect if this is a simple stream
@@ -157,6 +256,11 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
                     let mut decoded_first_message = false;
                     while let Ok(Some(msg)) = codec.decode() {
                         decoded_first_message = true;
+                        diagnostics::record_incoming_stream_first(
+                            &conn_clone.remote_addr().to_string(),
+                            first_data.len(),
+                            Some(msg.message_type()),
+                        );
                         log::debug!(
                             "Received {:?} from {} (first payload, {} bytes)",
                             msg.message_type(),
@@ -168,6 +272,11 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
                         }
                     }
                     if !decoded_first_message {
+                        diagnostics::record_incoming_stream_first(
+                            &conn_clone.remote_addr().to_string(),
+                            first_data.len(),
+                            None,
+                        );
                         log::warn!(
                             "No protocol message decoded from first stream payload from {} ({} bytes)",
                             conn_clone.remote_addr(),
@@ -189,7 +298,9 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
                                         conn_clone.remote_addr(),
                                         data.len()
                                     );
-                                    if let Err(e) = handle_message(&msg, &mut stream, &conn_clone).await {
+                                    if let Err(e) =
+                                        handle_message(&msg, &mut stream, &conn_clone).await
+                                    {
                                         log::error!("Failed to handle message: {}", e);
                                     }
                                 }
@@ -208,11 +319,12 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
                 });
             }
             Err(e) => {
-                log::debug!("Connection closed: {}", e);
+                log::info!("[diagnostics] Bi accept loop ended: {}", e);
                 break;
             }
         }
     }
+    uni_accept_task.abort();
 
     // Connection ended - keep the discovered device visible, but mark it disconnected.
     let peer_ip = conn.remote_addr().ip().to_string();
@@ -228,6 +340,66 @@ pub async fn handle_incoming_connection(conn: Arc<network::quic::QuicConnection>
     // Also clean up the QUIC connection entry
     network::quic::remove_connection_by_ip(&peer_ip);
     streaming::remove_active_viewer(&peer_ip);
+}
+
+fn handle_screen_frame_message(
+    conn: &Arc<network::quic::QuicConnection>,
+    timestamp: u64,
+    frame_type: network::protocol::FrameType,
+    sequence: u32,
+    data: &[u8],
+) {
+    let remote_ip = conn.remote_addr().ip().to_string();
+    diagnostics::record_screen_frame_received(sequence, data.len());
+    if sequence < 5 || sequence % 50 == 0 {
+        log::info!(
+            "Received screen frame {} from {} ({} bytes)",
+            sequence,
+            remote_ip,
+            data.len()
+        );
+    }
+
+    // Decode and render frame in native window (no Tauri event overhead)
+    let sessions = streaming::get_viewer_sessions();
+    let mut sessions_guard = sessions.write();
+
+    if let Some(session) = sessions_guard.get_mut(&remote_ip) {
+        if session.is_active() {
+            if let Err(e) = session.handle_screen_frame(sequence, frame_type, timestamp, data) {
+                if sequence % 100 == 0 {
+                    log::warn!("Frame {} decode error: {}", sequence, e);
+                }
+            } else if sequence < 5 || sequence % 50 == 0 {
+                log::info!(
+                    "Screen frame {} processed for {} (rendered frames={})",
+                    sequence,
+                    remote_ip,
+                    session.frame_count()
+                );
+            }
+        } else if sequence < 5 || sequence % 50 == 0 {
+            log::warn!("Frame {} received but viewer session is inactive", sequence);
+        }
+    } else if sequence < 5 || sequence % 50 == 0 {
+        log::warn!(
+            "Frame {} received but no viewer session for {}",
+            sequence,
+            remote_ip
+        );
+    }
+}
+
+fn handle_screen_stop_message(conn: &Arc<network::quic::QuicConnection>) {
+    let remote_ip = conn.remote_addr().ip().to_string();
+    log::info!("Received screen stop from {}", remote_ip);
+    streaming::remove_active_viewer(&remote_ip);
+
+    // Stop viewer session (closes native window)
+    let sessions = streaming::get_viewer_sessions();
+    if let Some(session) = sessions.write().get_mut(&remote_ip) {
+        session.handle_screen_stop();
+    }
 }
 
 /// Handle a protocol message
@@ -278,11 +450,14 @@ async fn handle_message(
                     device_name: String,
                     ip: String,
                 }
-                let _ = handle.emit("connection-received", ConnectionEvent {
-                    device_id: device_id.clone(),
-                    device_name: name.clone(),
-                    ip: remote_addr.ip().to_string(),
-                });
+                let _ = handle.emit(
+                    "connection-received",
+                    ConnectionEvent {
+                        device_id: device_id.clone(),
+                        device_name: name.clone(),
+                        ip: remote_addr.ip().to_string(),
+                    },
+                );
 
                 // Also emit device-discovered so the device list updates
                 let _ = handle.emit("device-discovered", &remote_device);
@@ -302,7 +477,11 @@ async fn handle_message(
 
             let peer_ip = remote_addr.ip().to_string();
             if let Err(e) = commands::send_current_sharing_status_to_peer(&peer_ip).await {
-                log::warn!("Failed to send current sharing status to {}: {}", peer_ip, e);
+                log::warn!(
+                    "Failed to send current sharing status to {}: {}",
+                    peer_ip,
+                    e
+                );
             }
         }
 
@@ -351,10 +530,7 @@ async fn handle_message(
 
             // Emit event to frontend
             if let Some(handle) = APP_HANDLE.get() {
-                let msg = chat::get_chat_manager()
-                    .get_messages()
-                    .into_iter()
-                    .last();
+                let msg = chat::get_chat_manager().get_messages().into_iter().last();
                 if let Some(msg) = msg {
                     let _ = handle.emit("chat-message", msg);
                 }
@@ -374,7 +550,9 @@ async fn handle_message(
             );
 
             // Update device sharing status
-            if let Some(device_id) = network::discovery::update_device_sharing_by_ip(&remote_ip, is_sharing) {
+            if let Some(device_id) =
+                network::discovery::update_device_sharing_by_ip(&remote_ip, is_sharing)
+            {
                 // Emit event to frontend
                 if let Some(handle) = APP_HANDLE.get() {
                     #[derive(serde::Serialize, Clone)]
@@ -382,15 +560,22 @@ async fn handle_message(
                         device_id: String,
                         is_sharing: bool,
                     }
-                    let _ = handle.emit("sharing-status-changed", SharingStatusEvent {
-                        device_id,
-                        is_sharing,
-                    });
+                    let _ = handle.emit(
+                        "sharing-status-changed",
+                        SharingStatusEvent {
+                            device_id,
+                            is_sharing,
+                        },
+                    );
                 }
             }
         }
 
-        Message::ScreenRequest { display_id, preferred_fps, preferred_quality } => {
+        Message::ScreenRequest {
+            display_id,
+            preferred_fps,
+            preferred_quality,
+        } => {
             let remote_ip = _conn.remote_addr().ip().to_string();
             log::info!(
                 "Received screen request from {}: display={}, fps={}, quality={}",
@@ -402,14 +587,26 @@ async fn handle_message(
 
             // Check if we are sharing
             let manager = streaming::get_streaming_manager();
-            let is_streaming = manager.read().as_ref().map(|m| m.is_streaming()).unwrap_or(false);
+            let is_streaming = manager
+                .read()
+                .as_ref()
+                .map(|m| m.is_streaming())
+                .unwrap_or(false);
 
             if is_streaming {
                 // Send ScreenStart response via a NEW stream (not the request stream)
                 // The request stream is already finished/dropped by the sender,
                 // so we must use send_to_peer to open a fresh stream
-                let (width, height) = manager.read().as_ref().map(|m| m.dimensions()).unwrap_or((1920, 1080));
-                let fps = manager.read().as_ref().map(|m| m.config().fps).unwrap_or(30);
+                let (width, height) = manager
+                    .read()
+                    .as_ref()
+                    .map(|m| m.dimensions())
+                    .unwrap_or((1920, 1080));
+                let fps = manager
+                    .read()
+                    .as_ref()
+                    .map(|m| m.config().fps)
+                    .unwrap_or(30);
 
                 let start_msg = network::protocol::Message::ScreenStart {
                     width,
@@ -422,25 +619,42 @@ async fn handle_message(
                     if let Err(e) = network::quic::send_to_peer(&remote_ip, &encoded).await {
                         log::error!("Failed to send ScreenStart to {}: {}", remote_ip, e);
                     } else {
-                        log::info!("Sent ScreenStart to {} ({}x{} @ {}fps)", remote_ip, width, height, fps);
+                        log::info!(
+                            "Sent ScreenStart to {} ({}x{} @ {}fps)",
+                            remote_ip,
+                            width,
+                            height,
+                            fps
+                        );
                         streaming::add_active_viewer(remote_ip.clone());
                         if let Some(handle) = APP_HANDLE.get() {
                             #[derive(serde::Serialize, Clone)]
                             struct ViewerConnectedEvent {
                                 peer_ip: String,
                             }
-                            let _ = handle.emit("viewer-connected", ViewerConnectedEvent {
-                                peer_ip: remote_ip.clone(),
-                            });
+                            let _ = handle.emit(
+                                "viewer-connected",
+                                ViewerConnectedEvent {
+                                    peer_ip: remote_ip.clone(),
+                                },
+                            );
                         }
                     }
                 }
             } else {
-                log::warn!("Received ScreenRequest from {} but we are not streaming", remote_ip);
+                log::warn!(
+                    "Received ScreenRequest from {} but we are not streaming",
+                    remote_ip
+                );
             }
         }
 
-        Message::ScreenStart { width, height, fps, codec } => {
+        Message::ScreenStart {
+            width,
+            height,
+            fps,
+            codec,
+        } => {
             let remote_ip = _conn.remote_addr().ip().to_string();
             log::info!(
                 "Received screen start from {}: {}x{} @ {} fps, codec={}",
@@ -463,10 +677,13 @@ async fn handle_message(
                                 peer_ip: String,
                                 error: Option<String>,
                             }
-                            let _ = handle.emit("viewer-started", ViewerEvent {
-                                peer_ip: remote_ip.clone(),
-                                error: None,
-                            });
+                            let _ = handle.emit(
+                                "viewer-started",
+                                ViewerEvent {
+                                    peer_ip: remote_ip.clone(),
+                                    error: None,
+                                },
+                            );
                         }
                     }
                     Err(e) => {
@@ -477,10 +694,13 @@ async fn handle_message(
                                 peer_ip: String,
                                 error: Option<String>,
                             }
-                            let _ = handle.emit("viewer-failed", ViewerEvent {
-                                peer_ip: remote_ip.clone(),
-                                error: Some(e.to_string()),
-                            });
+                            let _ = handle.emit(
+                                "viewer-failed",
+                                ViewerEvent {
+                                    peer_ip: remote_ip.clone(),
+                                    error: Some(e.to_string()),
+                                },
+                            );
                         }
                     }
                 }
@@ -496,64 +716,27 @@ async fn handle_message(
             }
         }
 
-        Message::ScreenFrame { timestamp, frame_type: _, sequence, data } => {
-            let remote_ip = _conn.remote_addr().ip().to_string();
-            if *sequence < 5 || *sequence % 50 == 0 {
-                log::info!(
-                    "Received screen frame {} from {} ({} bytes)",
-                    sequence,
-                    remote_ip,
-                    data.len()
-                );
-            }
-
-            // Decode and render frame in native window (no Tauri event overhead)
-            let sessions = streaming::get_viewer_sessions();
-            let mut sessions_guard = sessions.write();
-
-            if let Some(session) = sessions_guard.get_mut(&remote_ip) {
-                if session.is_active() {
-                    // Decode and render directly to native wgpu window
-                    if let Err(e) = session.handle_screen_frame(*timestamp, data) {
-                        // Only log occasional errors to avoid spam
-                        if *sequence % 100 == 0 {
-                            log::warn!("Frame {} decode error: {}", sequence, e);
-                        }
-                    } else if *sequence < 5 || *sequence % 50 == 0 {
-                        log::info!(
-                            "Screen frame {} processed for {} (rendered frames={})",
-                            sequence,
-                            remote_ip,
-                            session.frame_count()
-                        );
-                    }
-                } else if *sequence < 5 || *sequence % 50 == 0 {
-                    log::warn!("Frame {} received but viewer session is inactive", sequence);
-                }
-            } else if *sequence < 5 || *sequence % 50 == 0 {
-                log::warn!("Frame {} received but no viewer session for {}", sequence, remote_ip);
-            }
-
-            // Drop lock before any other operations
-            drop(sessions_guard);
+        Message::ScreenFrame {
+            timestamp,
+            frame_type,
+            sequence,
+            data,
+        } => {
+            handle_screen_frame_message(_conn, *timestamp, *frame_type, *sequence, data);
         }
 
         Message::ScreenStop => {
-            let remote_ip = _conn.remote_addr().ip().to_string();
-            log::info!("Received screen stop from {}", remote_ip);
-            streaming::remove_active_viewer(&remote_ip);
-
-            // Stop viewer session (closes native window)
-            let sessions = streaming::get_viewer_sessions();
-            if let Some(session) = sessions.write().get_mut(&remote_ip) {
-                session.handle_screen_stop();
-            }
+            handle_screen_stop_message(_conn);
         }
 
         // Simple streaming request (minimal pipeline)
         Message::SimpleScreenRequest { display_id } => {
             let remote_ip = _conn.remote_addr().ip().to_string();
-            log::info!("[SIMPLE] Received SimpleScreenRequest from {} (display={})", remote_ip, display_id);
+            log::info!(
+                "[SIMPLE] Received SimpleScreenRequest from {} (display={})",
+                remote_ip,
+                display_id
+            );
 
             // Handle in a background task - this will open a persistent stream and stream frames
             let peer_ip = remote_ip.clone();
@@ -576,15 +759,16 @@ async fn handle_message(
                     from_user: String,
                     peer_ip: String,
                 }
-                let _ = handle.emit("control-request-received", ControlRequestEvent {
-                    from_user: from_user.clone(),
-                    peer_ip: remote_ip,
-                });
+                let _ = handle.emit(
+                    "control-request-received",
+                    ControlRequestEvent {
+                        from_user: from_user.clone(),
+                        peer_ip: remote_ip,
+                    },
+                );
             }
         }
-        Message::ControlGrant { .. }
-        | Message::ControlRevoke
-        | Message::InputEvent { .. } => {
+        Message::ControlGrant { .. } | Message::ControlRevoke | Message::InputEvent { .. } => {
             log::debug!("Remote control message received (not yet implemented)");
         }
 
@@ -652,15 +836,22 @@ async fn handle_message(
                             let offset = i * chunk_size;
 
                             // Check if transfer was cancelled
-                            if let Some(current) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                            if let Some(current) =
+                                transfer::get_transfer_manager().get_transfer(&file_id)
+                            {
                                 if !matches!(current.status, transfer::TransferStatus::InProgress) {
-                                    log::warn!("File transfer {} cancelled during chunk sending", file_id);
+                                    log::warn!(
+                                        "File transfer {} cancelled during chunk sending",
+                                        file_id
+                                    );
                                     return;
                                 }
                             }
 
                             // Read chunk from file
-                            let chunk = match transfer::get_transfer_manager().get_chunk(&file_id, offset) {
+                            let chunk = match transfer::get_transfer_manager()
+                                .get_chunk(&file_id, offset)
+                            {
                                 Ok(data) => data,
                                 Err(e) => {
                                     log::error!("Failed to read chunk for {}: {}", file_id, e);
@@ -690,7 +881,9 @@ async fn handle_message(
 
                             // Update progress
                             let bytes_sent = ((i + 1) * chunk_size).min(file_size);
-                            if let Some(mut t) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                            if let Some(mut t) =
+                                transfer::get_transfer_manager().get_transfer(&file_id)
+                            {
                                 t.update_progress(bytes_sent);
                             }
 
@@ -702,12 +895,17 @@ async fn handle_message(
                                     progress: f32,
                                     bytes: u64,
                                 }
-                                if let Some(current) = transfer::get_transfer_manager().get_transfer(&file_id) {
-                                    let _ = handle.emit("file-progress", OutgoingProgress {
-                                        file_id: file_id.clone(),
-                                        progress: current.progress,
-                                        bytes: bytes_sent,
-                                    });
+                                if let Some(current) =
+                                    transfer::get_transfer_manager().get_transfer(&file_id)
+                                {
+                                    let _ = handle.emit(
+                                        "file-progress",
+                                        OutgoingProgress {
+                                            file_id: file_id.clone(),
+                                            progress: current.progress,
+                                            bytes: bytes_sent,
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -720,7 +918,8 @@ async fn handle_message(
                             let _ = network::quic::send_to_peer(&peer_id, &encoded).await;
                         }
 
-                        if let Some(mut t) = transfer::get_transfer_manager().get_transfer(&file_id) {
+                        if let Some(mut t) = transfer::get_transfer_manager().get_transfer(&file_id)
+                        {
                             t.complete();
                         }
 
@@ -732,9 +931,12 @@ async fn handle_message(
                             struct OutgoingComplete {
                                 file_id: String,
                             }
-                            let _ = handle.emit("file-complete", &OutgoingComplete {
-                                file_id: file_id.clone(),
-                            });
+                            let _ = handle.emit(
+                                "file-complete",
+                                &OutgoingComplete {
+                                    file_id: file_id.clone(),
+                                },
+                            );
                         }
                     });
                 }
@@ -765,18 +967,23 @@ async fn handle_message(
 
                     // Emit progress event to frontend
                     if let Some(handle) = APP_HANDLE.get() {
-                        if let Some(transfer) = transfer::get_transfer_manager().get_transfer(file_id) {
+                        if let Some(transfer) =
+                            transfer::get_transfer_manager().get_transfer(file_id)
+                        {
                             #[derive(serde::Serialize, Clone)]
                             struct ProgressEvent {
                                 file_id: String,
                                 progress: f32,
                                 bytes: u64,
                             }
-                            let _ = handle.emit("file-progress", ProgressEvent {
-                                file_id: file_id.clone(),
-                                progress: transfer.progress,
-                                bytes,
-                            });
+                            let _ = handle.emit(
+                                "file-progress",
+                                ProgressEvent {
+                                    file_id: file_id.clone(),
+                                    progress: transfer.progress,
+                                    bytes,
+                                },
+                            );
                         }
                     }
                 }
@@ -801,10 +1008,13 @@ async fn handle_message(
                             file_id: String,
                             success: bool,
                         }
-                        let _ = handle.emit("file-complete", CompleteEvent {
-                            file_id: file_id.clone(),
-                            success: true,
-                        });
+                        let _ = handle.emit(
+                            "file-complete",
+                            CompleteEvent {
+                                file_id: file_id.clone(),
+                                success: true,
+                            },
+                        );
                     }
                 }
                 Err(e) => {
@@ -817,10 +1027,13 @@ async fn handle_message(
                             file_id: String,
                             success: bool,
                         }
-                        let _ = handle.emit("file-complete", CompleteEvent {
-                            file_id: file_id.clone(),
-                            success: false,
-                        });
+                        let _ = handle.emit(
+                            "file-complete",
+                            CompleteEvent {
+                                file_id: file_id.clone(),
+                                success: false,
+                            },
+                        );
                     }
                 }
             }
@@ -836,9 +1049,12 @@ async fn handle_message(
                 struct CancelEvent {
                     file_id: String,
                 }
-                let _ = handle.emit("file-cancelled", CancelEvent {
-                    file_id: file_id.clone(),
-                });
+                let _ = handle.emit(
+                    "file-cancelled",
+                    CancelEvent {
+                        file_id: file_id.clone(),
+                    },
+                );
             }
         }
     }
@@ -859,7 +1075,13 @@ async fn handle_simple_stream_with_first(
     let mut frame_count: u32 = 0;
 
     // Process the first message
-    process_simple_message(first_data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
+    process_simple_message(
+        first_data,
+        peer_ip,
+        &mut decoder,
+        &mut window_handle,
+        &mut frame_count,
+    );
 
     // Send initial resolution request based on saved settings (if window was just created)
     if window_handle.is_some() {
@@ -871,9 +1093,15 @@ async fn handle_simple_stream_with_first(
                 res_opts.get(res_idx.min(res_opts.len() - 1)),
                 br_opts.get(br_idx.min(br_opts.len() - 1)),
             ) {
-                log::info!("[SIMPLE] Sending initial resolution request: {} + {}", res.label, br.label);
+                log::info!(
+                    "[SIMPLE] Sending initial resolution request: {} + {}",
+                    res.label,
+                    br.label
+                );
                 let req = crate::simple_streaming::encode_resolution_request_msg(
-                    res.target_width, res.target_height, br.bitrate,
+                    res.target_width,
+                    res.target_height,
+                    br.bitrate,
                 );
                 if let Err(e) = stream.send_framed(&req).await {
                     log::error!("[SIMPLE] Failed to send initial resolution request: {}", e);
@@ -888,9 +1116,21 @@ async fn handle_simple_stream_with_first(
         // Poll window events (resolution requests)
         if let Some(ref handle) = window_handle {
             while let Some(event) = handle.try_recv_event() {
-                if let crate::renderer::WindowEvent::ResolutionRequested(target_w, target_h, bitrate) = event {
-                    log::info!("[SIMPLE] Viewer requesting resolution {}x{} @ {} bps", target_w, target_h, bitrate);
-                    let req = crate::simple_streaming::encode_resolution_request_msg(target_w, target_h, bitrate);
+                if let crate::renderer::WindowEvent::ResolutionRequested(
+                    target_w,
+                    target_h,
+                    bitrate,
+                ) = event
+                {
+                    log::info!(
+                        "[SIMPLE] Viewer requesting resolution {}x{} @ {} bps",
+                        target_w,
+                        target_h,
+                        bitrate
+                    );
+                    let req = crate::simple_streaming::encode_resolution_request_msg(
+                        target_w, target_h, bitrate,
+                    );
                     if let Err(e) = stream.send_framed(&req).await {
                         log::error!("[SIMPLE] Failed to send resolution request: {}", e);
                     }
@@ -902,17 +1142,17 @@ async fn handle_simple_stream_with_first(
             }
         }
 
-        let data = match tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            stream.recv_framed(),
-        ).await {
-            Ok(Ok(d)) => d,
-            Ok(Err(e)) => {
-                log::info!("[SIMPLE] Stream closed from {}: {}", peer_ip, e);
-                break;
-            }
-            Err(_) => continue, // timeout, loop back to poll events
-        };
+        let data =
+            match tokio::time::timeout(std::time::Duration::from_millis(100), stream.recv_framed())
+                .await
+            {
+                Ok(Ok(d)) => d,
+                Ok(Err(e)) => {
+                    log::info!("[SIMPLE] Stream closed from {}: {}", peer_ip, e);
+                    break;
+                }
+                Err(_) => continue, // timeout, loop back to poll events
+            };
 
         if data.is_empty() {
             log::warn!("[SIMPLE] Empty data received from {}", peer_ip);
@@ -921,8 +1161,13 @@ async fn handle_simple_stream_with_first(
 
         let msg_type = data[0];
         if frame_count < 10 || frame_count % 50 == 0 {
-            log::info!("[SIMPLE] Received msg type=0x{:02x}, {} bytes from {} (frame_count={})",
-                msg_type, data.len(), peer_ip, frame_count);
+            log::info!(
+                "[SIMPLE] Received msg type=0x{:02x}, {} bytes from {} (frame_count={})",
+                msg_type,
+                data.len(),
+                peer_ip,
+                frame_count
+            );
         }
 
         if msg_type == 0x03 {
@@ -931,14 +1176,23 @@ async fn handle_simple_stream_with_first(
             break;
         }
 
-        process_simple_message(&data, peer_ip, &mut decoder, &mut window_handle, &mut frame_count);
+        process_simple_message(
+            &data,
+            peer_ip,
+            &mut decoder,
+            &mut window_handle,
+            &mut frame_count,
+        );
     }
 
     // Cleanup
     if let Some(handle) = window_handle.as_ref() {
         handle.close();
     }
-    log::info!("[SIMPLE] Simple stream handler ended, {} frames rendered", frame_count);
+    log::info!(
+        "[SIMPLE] Simple stream handler ended, {} frames rendered",
+        frame_count
+    );
 }
 
 /// Process a single simple streaming message
@@ -963,14 +1217,22 @@ fn process_simple_message(
         0x01 => {
             // MSG_TYPE_START
             if data.len() < 9 {
-                log::error!("[SIMPLE] ScreenStart message too short: {} bytes", data.len());
+                log::error!(
+                    "[SIMPLE] ScreenStart message too short: {} bytes",
+                    data.len()
+                );
                 return;
             }
 
             let width = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
             let height = u32::from_be_bytes([data[5], data[6], data[7], data[8]]);
 
-            log::info!("[SIMPLE] Received ScreenStart: {}x{} from {}", width, height, peer_ip);
+            log::info!(
+                "[SIMPLE] Received ScreenStart: {}x{} from {}",
+                width,
+                height,
+                peer_ip
+            );
 
             // Init decoder
             let mut dec = match SoftwareDecoder::new() {
@@ -1020,14 +1282,16 @@ fn process_simple_message(
             }
 
             let timestamp = u64::from_be_bytes([
-                data[1], data[2], data[3], data[4],
-                data[5], data[6], data[7], data[8],
+                data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8],
             ]);
             let frame_len = u32::from_be_bytes([data[9], data[10], data[11], data[12]]) as usize;
 
             if data.len() < 13 + frame_len {
-                log::warn!("[SIMPLE] Frame data truncated: expected {} bytes, got {}",
-                    13 + frame_len, data.len());
+                log::warn!(
+                    "[SIMPLE] Frame data truncated: expected {} bytes, got {}",
+                    13 + frame_len,
+                    data.len()
+                );
                 return;
             }
 

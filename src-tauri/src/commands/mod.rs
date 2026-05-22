@@ -160,8 +160,8 @@ pub async fn connect_to_device(device_id: String) -> Result<(), String> {
         .map_err(|e| format!("Invalid address: {}", e))?;
 
     // Get QUIC endpoint
-    let endpoint = crate::get_quic_endpoint()
-        .ok_or_else(|| "QUIC endpoint not initialized".to_string())?;
+    let endpoint =
+        crate::get_quic_endpoint().ok_or_else(|| "QUIC endpoint not initialized".to_string())?;
 
     // Connect to device
     let conn = endpoint
@@ -187,8 +187,8 @@ pub async fn connect_to_device(device_id: String) -> Result<(), String> {
         .unwrap_or_else(|_| "Unknown".to_string());
 
     let handshake = protocol::create_handshake(&our_id, &our_name);
-    let encoded = protocol::encode(&handshake)
-        .map_err(|e| format!("Failed to encode handshake: {}", e))?;
+    let encoded =
+        protocol::encode(&handshake).map_err(|e| format!("Failed to encode handshake: {}", e))?;
 
     stream
         .send_framed(&encoded)
@@ -207,7 +207,12 @@ pub async fn connect_to_device(device_id: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to decode handshake ack: {}", e))?;
 
     match ack {
-        protocol::Message::HandshakeAck { accepted, reason, name, .. } => {
+        protocol::Message::HandshakeAck {
+            accepted,
+            reason,
+            name,
+            ..
+        } => {
             if accepted {
                 log::info!("Connection accepted by {}", name);
                 let conn_clone = conn.clone();
@@ -216,7 +221,11 @@ pub async fn connect_to_device(device_id: String) -> Result<(), String> {
                 });
 
                 if let Err(e) = send_current_sharing_status_to_peer(&device.ip).await {
-                    log::warn!("Failed to send current sharing status to {}: {}", device.ip, e);
+                    log::warn!(
+                        "Failed to send current sharing status to {}: {}",
+                        device.ip,
+                        e
+                    );
                 }
 
                 Ok(())
@@ -466,14 +475,21 @@ pub async fn offer_file(file_path: String, peer_id: String) -> Result<FileTransf
         }
     }
 
-    log::info!("File offer created: {} ({} bytes)", transfer.info.name, transfer.info.size);
+    log::info!(
+        "File offer created: {} ({} bytes)",
+        transfer.info.name,
+        transfer.info.size
+    );
 
     Ok(transfer)
 }
 
 /// Accept an incoming file transfer
 #[tauri::command]
-pub async fn accept_file_transfer(file_id: String, dest_path: Option<String>) -> Result<(), String> {
+pub async fn accept_file_transfer(
+    file_id: String,
+    dest_path: Option<String>,
+) -> Result<(), String> {
     use crate::network::protocol;
 
     log::info!("Accepting file transfer: {}", file_id);
@@ -858,8 +874,8 @@ pub async fn send_current_sharing_status_to_peer(peer_ip: &str) -> Result<(), St
     };
 
     let msg = protocol::Message::ScreenOffer { displays };
-    let encoded = protocol::encode(&msg)
-        .map_err(|e| format!("Failed to encode sharing status: {}", e))?;
+    let encoded =
+        protocol::encode(&msg).map_err(|e| format!("Failed to encode sharing status: {}", e))?;
 
     quic::send_to_peer(peer_ip, &encoded)
         .await
@@ -870,11 +886,18 @@ pub async fn send_current_sharing_status_to_peer(peer_ip: &str) -> Result<(), St
 
 /// Broadcast sharing status to all connected peers
 #[tauri::command]
-pub async fn broadcast_sharing_status(is_sharing: bool, display_id: Option<u32>) -> Result<(), String> {
+pub async fn broadcast_sharing_status(
+    is_sharing: bool,
+    display_id: Option<u32>,
+) -> Result<(), String> {
     use crate::network::protocol;
-    use crate::streaming::{get_streaming_manager, StreamingConfig, Quality, StreamingManager};
+    use crate::streaming::{Quality, StreamingConfig, StreamingManager, get_streaming_manager};
 
-    log::info!("Broadcasting sharing status: {} (display: {:?})", is_sharing, display_id);
+    log::info!(
+        "Broadcasting sharing status: {} (display: {:?})",
+        is_sharing,
+        display_id
+    );
 
     *IS_SHARING.write() = is_sharing;
 
@@ -982,10 +1005,13 @@ pub async fn request_screen_stream(
 
     // Ensure we have an active QUIC connection to this peer
     if let Err(e) = ensure_peer_connection(&peer_ip).await {
-        let _ = app_handle.emit("viewer-failed", ViewerEvent {
-            peer_ip: peer_ip.clone(),
-            error: Some(e.clone()),
-        });
+        let _ = app_handle.emit(
+            "viewer-failed",
+            ViewerEvent {
+                peer_ip: peer_ip.clone(),
+                error: Some(e.clone()),
+            },
+        );
         return Err(e);
     }
 
@@ -994,28 +1020,37 @@ pub async fn request_screen_stream(
         Ok(started) => started,
         Err(e) => {
             let message = format!("Failed to create viewer session: {}", e);
-            let _ = app_handle.emit("viewer-failed", ViewerEvent {
-                peer_ip: peer_ip.clone(),
-                error: Some(message.clone()),
-            });
+            let _ = app_handle.emit(
+                "viewer-failed",
+                ViewerEvent {
+                    peer_ip: peer_ip.clone(),
+                    error: Some(message.clone()),
+                },
+            );
             return Err(message);
         }
     };
 
     if started_immediately {
-        let _ = app_handle.emit("viewer-started", ViewerEvent {
-            peer_ip: peer_ip.clone(),
-            error: None,
-        });
+        let _ = app_handle.emit(
+            "viewer-started",
+            ViewerEvent {
+                peer_ip: peer_ip.clone(),
+                error: None,
+            },
+        );
     }
 
     // Send request to peer
     if let Err(e) = streaming::request_screen_stream(&peer_ip, 0).await {
         let message = format!("Failed to request stream: {}", e);
-        let _ = app_handle.emit("viewer-failed", ViewerEvent {
-            peer_ip: peer_ip.clone(),
-            error: Some(message.clone()),
-        });
+        let _ = app_handle.emit(
+            "viewer-failed",
+            ViewerEvent {
+                peer_ip: peer_ip.clone(),
+                error: Some(message.clone()),
+            },
+        );
         return Err(message);
     }
 
@@ -1054,13 +1089,10 @@ async fn ensure_peer_connection(peer_ip: &str) -> Result<(), String> {
         .ok_or_else(|| "QUIC endpoint not initialized - start service first".to_string())?;
 
     // Connect with timeout
-    let conn = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        endpoint.connect(addr),
-    )
-    .await
-    .map_err(|_| format!("Connection to {} timed out", peer_ip))?
-    .map_err(|e| format!("Failed to connect to {}: {}", peer_ip, e))?;
+    let conn = tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.connect(addr))
+        .await
+        .map_err(|_| format!("Connection to {} timed out", peer_ip))?
+        .map_err(|e| format!("Failed to connect to {}: {}", peer_ip, e))?;
 
     log::info!("Connected to {} at {}", peer_ip, conn.remote_addr());
 
@@ -1085,21 +1117,26 @@ async fn ensure_peer_connection(peer_ip: &str) -> Result<(), String> {
         .map_err(|e| format!("Failed to send handshake: {}", e))?;
 
     // Wait for handshake ack
-    let response = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        stream.recv_framed(),
-    )
-    .await
-    .map_err(|_| "Handshake ack timed out".to_string())?
-    .map_err(|e| format!("Failed to receive handshake ack: {}", e))?;
+    let response = tokio::time::timeout(std::time::Duration::from_secs(5), stream.recv_framed())
+        .await
+        .map_err(|_| "Handshake ack timed out".to_string())?
+        .map_err(|e| format!("Failed to receive handshake ack: {}", e))?;
 
     let ack = crate::network::protocol::decode(&response)
         .map_err(|e| format!("Failed to decode handshake ack: {}", e))?;
 
     match ack {
-        crate::network::protocol::Message::HandshakeAck { accepted, reason, name, .. } => {
+        crate::network::protocol::Message::HandshakeAck {
+            accepted,
+            reason,
+            name,
+            ..
+        } => {
             if !accepted {
-                return Err(format!("Connection rejected: {}", reason.unwrap_or_default()));
+                return Err(format!(
+                    "Connection rejected: {}",
+                    reason.unwrap_or_default()
+                ));
             }
             log::info!("Reconnected and handshake accepted by {}", name);
         }
@@ -1122,6 +1159,19 @@ pub fn stop_viewing_stream(peer_ip: String) -> Result<(), String> {
 
     log::info!("Stopping stream viewer for {}", peer_ip);
     streaming::remove_viewer_session(&peer_ip);
+    Ok(())
+}
+
+/// Get pipeline diagnostics snapshot for e2e testing
+#[tauri::command]
+pub fn get_diagnostics() -> Result<crate::diagnostics::ScreenDiagnosticsSnapshot, String> {
+    Ok(crate::diagnostics::snapshot())
+}
+
+/// Reset pipeline diagnostics counters
+#[tauri::command]
+pub fn reset_diagnostics() -> Result<(), String> {
+    crate::diagnostics::reset();
     Ok(())
 }
 
@@ -1214,7 +1264,10 @@ pub async fn request_control(peer_id: String) -> Result<(), String> {
 /// Start simple screen sharing (OpenH264 only, no optimizations)
 #[tauri::command]
 pub async fn simple_start_sharing(display_id: u32) -> Result<(), String> {
-    log::info!("[SIMPLE] Command: simple_start_sharing(display_id={})", display_id);
+    log::info!(
+        "[SIMPLE] Command: simple_start_sharing(display_id={})",
+        display_id
+    );
     crate::simple_streaming::start_sharing(display_id)
 }
 
@@ -1223,15 +1276,18 @@ pub async fn simple_start_sharing(display_id: u32) -> Result<(), String> {
 pub async fn simple_request_stream(peer_ip: String) -> Result<(), String> {
     use crate::network::protocol;
 
-    log::info!("[SIMPLE] Command: simple_request_stream(peer_ip={})", peer_ip);
+    log::info!(
+        "[SIMPLE] Command: simple_request_stream(peer_ip={})",
+        peer_ip
+    );
 
     // Ensure connection
     ensure_peer_connection(&peer_ip).await?;
 
     // Send SimpleScreenRequest to the sharer
     let msg = protocol::Message::SimpleScreenRequest { display_id: 0 };
-    let encoded = protocol::encode(&msg)
-        .map_err(|e| format!("[SIMPLE] Failed to encode request: {}", e))?;
+    let encoded =
+        protocol::encode(&msg).map_err(|e| format!("[SIMPLE] Failed to encode request: {}", e))?;
 
     quic::send_to_peer(&peer_ip, &encoded)
         .await

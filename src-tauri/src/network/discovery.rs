@@ -6,8 +6,8 @@ use mdns_sd::{ResolvedService, ServiceDaemon, ServiceEvent, ServiceInfo};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter};
 
@@ -224,7 +224,11 @@ fn handle_service_event(event: ServiceEvent, app: &AppHandle) {
             }
 
             // Log all addresses for debugging VPN/virtual interface issues
-            let all_addrs: Vec<String> = info.addresses.iter().map(|a| a.to_ip_addr().to_string()).collect();
+            let all_addrs: Vec<String> = info
+                .addresses
+                .iter()
+                .map(|a| a.to_ip_addr().to_string())
+                .collect();
             log::debug!("mDNS resolved addresses: {:?}", all_addrs);
 
             let device = extract_device_info(&info);
@@ -287,28 +291,38 @@ fn extract_device_info(info: &ResolvedService) -> Option<(DiscoveredDevice, bool
     let ip = ipv4_addrs
         .iter()
         .find(|ip| crate::commands::is_same_subnet(ip, &our_subnets))
-        .or_else(|| ipv4_addrs.iter().find(|ip| crate::commands::is_real_lan_ip(ip)))
+        .or_else(|| {
+            ipv4_addrs
+                .iter()
+                .find(|ip| crate::commands::is_real_lan_ip(ip))
+        })
         .or_else(|| ipv4_addrs.first())
         .map(|ip| ip.to_string())?;
 
     let port = info.port;
 
-    Some((DiscoveredDevice {
-        id,
-        name,
-        ip,
-        port,
-        status: DeviceStatus::Online,
-        last_seen: now_ms(),
-        is_sharing,
-    }, sharing_prop.is_some()))
+    Some((
+        DiscoveredDevice {
+            id,
+            name,
+            ip,
+            port,
+            status: DeviceStatus::Online,
+            last_seen: now_ms(),
+            is_sharing,
+        },
+        sharing_prop.is_some(),
+    ))
 }
 
 /// Find device by mDNS fullname
 fn find_device_by_fullname(fullname: &str) -> Option<DiscoveredDevice> {
     let devices = DEVICES.read();
     // The fullname contains the instance name, try to match
-    devices.values().find(|d| fullname.contains(&d.id[..8])).cloned()
+    devices
+        .values()
+        .find(|d| fullname.contains(&d.id[..8]))
+        .cloned()
 }
 
 /// Get all discovered devices
@@ -451,21 +465,23 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
     let response = match tokio::time::timeout(Duration::from_secs(5), recv_future).await {
         Ok(Ok(data)) => data,
         Ok(Err(e)) => {
-            return Err(NetworkError::ConnectionFailed(format!(
-                "握手失败: {}", e
-            )));
+            return Err(NetworkError::ConnectionFailed(format!("握手失败: {}", e)));
         }
         Err(_) => {
-            return Err(NetworkError::ConnectionFailed(
-                "握手超时".to_string(),
-            ));
+            return Err(NetworkError::ConnectionFailed("握手超时".to_string()));
         }
     };
 
     // Parse handshake ack to get device info
     let ack = protocol::decode(&response)?;
     let (device_id, device_name) = match ack {
-        protocol::Message::HandshakeAck { device_id, name, accepted, reason, .. } => {
+        protocol::Message::HandshakeAck {
+            device_id,
+            name,
+            accepted,
+            reason,
+            ..
+        } => {
             if !accepted {
                 return Err(NetworkError::ConnectionFailed(format!(
                     "对方拒绝连接: {}",
@@ -475,9 +491,7 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
             (device_id, name)
         }
         _ => {
-            return Err(NetworkError::ConnectionFailed(
-                "无效的握手响应".to_string(),
-            ));
+            return Err(NetworkError::ConnectionFailed("无效的握手响应".to_string()));
         }
     };
 
@@ -493,7 +507,11 @@ pub async fn add_manual_device(ip: String, port: u16) -> Result<DiscoveredDevice
     };
 
     add_device(device.clone());
-    log::info!("Manual device added and verified: {} ({})", device.name, device.ip);
+    log::info!(
+        "Manual device added and verified: {} ({})",
+        device.name,
+        device.ip
+    );
 
     // Start listening for incoming messages on this connection
     // This is important so we can receive sharing status updates from the peer
